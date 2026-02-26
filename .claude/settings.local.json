@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.joinquant.com)",
+      "WebFetch(domain:www.ricequant.com)",
+      "WebFetch(domain:www.myquant.cn)",
+      "WebFetch(domain:dict.thinktrader.net)",
+      "WebFetch(domain:pypi.org)"
+    ]
+  }
+}

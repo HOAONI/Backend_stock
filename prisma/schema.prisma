@@ -1,0 +1,639 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AnalysisTaskStatus {
+  pending
+  processing
+  completed
+  failed
+}
+
+enum AdminUserStatus {
+  active
+  disabled
+}
+
+enum AdminAuditAction {
+  read
+  write
+}
+
+enum UserBrokerAccountStatus {
+  active
+  disabled
+}
+
+enum BrokerEnvironment {
+  paper
+  simulation
+}
+
+enum SimulationOrderStatus {
+  pending
+  partial_filled
+  filled
+  cancelled
+}
+
+enum SimulationOrderDirection {
+  buy
+  sell
+}
+
+enum SimulationOrderType {
+  limit
+  market
+}
+
+enum AgentCredentialScope {
+  read
+  trade
+}
+
+model AnalysisHistory {
+  id               Int       @id @default(autoincrement())
+  ownerUserId      Int?      @map("owner_user_id")
+  queryId          String?   @map("query_id") @db.VarChar(64)
+  code             String    @db.VarChar(10)
+  name             String?   @db.VarChar(50)
+  reportType       String?   @map("report_type") @db.VarChar(16)
+  sentimentScore   Int?      @map("sentiment_score")
+  operationAdvice  String?   @map("operation_advice") @db.VarChar(20)
+  trendPrediction  String?   @map("trend_prediction") @db.VarChar(50)
+  analysisSummary  String?   @map("analysis_summary")
+  rawResult        String?   @map("raw_result")
+  newsContent      String?   @map("news_content")
+  contextSnapshot  String?   @map("context_snapshot")
+  idealBuy         Float?    @map("ideal_buy")
+  secondaryBuy     Float?    @map("secondary_buy")
+  stopLoss         Float?    @map("stop_loss")
+  takeProfit       Float?    @map("take_profit")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  backtestResults  BacktestResult[]
+  ownerUser        AdminUser? @relation("AnalysisHistoryOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@index([queryId], map: "ix_analysis_history_query_id")
+  @@index([code, createdAt], map: "ix_analysis_code_time")
+  @@index([ownerUserId, createdAt], map: "ix_analysis_history_owner_created")
+  @@map("analysis_history")
+}
+
+model NewsIntel {
+  id                 Int       @id @default(autoincrement())
+  ownerUserId        Int?      @map("owner_user_id")
+  queryId            String?   @map("query_id") @db.VarChar(64)
+  code               String    @db.VarChar(10)
+  name               String?   @db.VarChar(50)
+  dimension          String?   @db.VarChar(32)
+  query              String?   @db.VarChar(255)
+  provider           String?   @db.VarChar(32)
+  title              String    @db.VarChar(300)
+  snippet            String?
+  url                String    @unique(map: "uix_news_url") @db.VarChar(1000)
+  source             String?   @db.VarChar(100)
+  publishedDate      DateTime? @map("published_date")
+  fetchedAt          DateTime  @default(now()) @map("fetched_at")
+  querySource        String?   @map("query_source") @db.VarChar(32)
+  requesterPlatform  String?   @map("requester_platform") @db.VarChar(20)
+  requesterUserId    String?   @map("requester_user_id") @db.VarChar(64)
+  requesterUserName  String?   @map("requester_user_name") @db.VarChar(64)
+  requesterChatId    String?   @map("requester_chat_id") @db.VarChar(64)
+  requesterMessageId String?   @map("requester_message_id") @db.VarChar(64)
+  requesterQuery     String?   @map("requester_query") @db.VarChar(255)
+  ownerUser          AdminUser? @relation("NewsIntelOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@index([queryId], map: "ix_news_query_id")
+  @@index([code, publishedDate], map: "ix_news_code_pub")
+  @@index([fetchedAt], map: "ix_news_fetched_at")
+  @@index([ownerUserId, fetchedAt], map: "ix_news_owner_fetched_at")
+  @@map("news_intel")
+}
+
+model BacktestResult {
+  id                  Int       @id @default(autoincrement())
+  ownerUserId         Int?      @map("owner_user_id")
+  analysisHistoryId   Int       @map("analysis_history_id")
+  code                String    @db.VarChar(10)
+  analysisDate        DateTime? @map("analysis_date") @db.Date
+  evalWindowDays      Int       @default(10) @map("eval_window_days")
+  engineVersion       String    @default("v1") @map("engine_version") @db.VarChar(16)
+  evalStatus          String    @default("pending") @map("eval_status") @db.VarChar(16)
+  evaluatedAt         DateTime  @default(now()) @map("evaluated_at")
+  operationAdvice     String?   @map("operation_advice") @db.VarChar(20)
+  positionRecommendation String? @map("position_recommendation") @db.VarChar(8)
+  startPrice          Float?    @map("start_price")
+  endClose            Float?    @map("end_close")
+  maxHigh             Float?    @map("max_high")
+  minLow              Float?    @map("min_low")
+  stockReturnPct      Float?    @map("stock_return_pct")
+  directionExpected   String?   @map("direction_expected") @db.VarChar(16)
+  directionCorrect    Boolean?  @map("direction_correct")
+  outcome             String?   @db.VarChar(16)
+  stopLoss            Float?    @map("stop_loss")
+  takeProfit          Float?    @map("take_profit")
+  hitStopLoss         Boolean?  @map("hit_stop_loss")
+  hitTakeProfit       Boolean?  @map("hit_take_profit")
+  firstHit            String?   @map("first_hit") @db.VarChar(16)
+  firstHitDate        DateTime? @map("first_hit_date") @db.Date
+  firstHitTradingDays Int?      @map("first_hit_trading_days")
+  simulatedEntryPrice Float?    @map("simulated_entry_price")
+  simulatedExitPrice  Float?    @map("simulated_exit_price")
+  simulatedExitReason String?   @map("simulated_exit_reason") @db.VarChar(24)
+  simulatedReturnPct  Float?    @map("simulated_return_pct")
+
+  analysisHistory     AnalysisHistory @relation(fields: [analysisHistoryId], references: [id], onDelete: Cascade)
+  ownerUser           AdminUser? @relation("BacktestResultOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@unique([analysisHistoryId, evalWindowDays, engineVersion], map: "uix_backtest_analysis_window_version")
+  @@index([code, analysisDate], map: "ix_backtest_code_date")
+  @@index([evaluatedAt], map: "ix_backtest_evaluated_at")
+  @@index([ownerUserId, evaluatedAt], map: "ix_backtest_results_owner_evaluated")
+  @@map("backtest_results")
+}
+
+model BacktestSummary {
+  id                   Int       @id @default(autoincrement())
+  ownerUserId          Int?      @map("owner_user_id")
+  scope                String    @db.VarChar(16)
+  code                 String?   @db.VarChar(16)
+  evalWindowDays       Int       @default(10) @map("eval_window_days")
+  engineVersion        String    @default("v1") @map("engine_version") @db.VarChar(16)
+  computedAt           DateTime  @default(now()) @map("computed_at")
+  totalEvaluations     Int       @default(0) @map("total_evaluations")
+  completedCount       Int       @default(0) @map("completed_count")
+  insufficientCount    Int       @default(0) @map("insufficient_count")
+  longCount            Int       @default(0) @map("long_count")
+  cashCount            Int       @default(0) @map("cash_count")
+  winCount             Int       @default(0) @map("win_count")
+  lossCount            Int       @default(0) @map("loss_count")
+  neutralCount         Int       @default(0) @map("neutral_count")
+  directionAccuracyPct Float?    @map("direction_accuracy_pct")
+  winRatePct           Float?    @map("win_rate_pct")
+  neutralRatePct       Float?    @map("neutral_rate_pct")
+  avgStockReturnPct    Float?    @map("avg_stock_return_pct")
+  avgSimulatedReturnPct Float?   @map("avg_simulated_return_pct")
+  stopLossTriggerRate  Float?    @map("stop_loss_trigger_rate")
+  takeProfitTriggerRate Float?   @map("take_profit_trigger_rate")
+  ambiguousRate        Float?    @map("ambiguous_rate")
+  avgDaysToFirstHit    Float?    @map("avg_days_to_first_hit")
+  adviceBreakdownJson  String?   @map("advice_breakdown_json")
+  diagnosticsJson      String?   @map("diagnostics_json")
+  ownerUser            AdminUser? @relation("BacktestSummaryOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@unique([ownerUserId, scope, code, evalWindowDays, engineVersion], map: "uix_backtest_summary_owner_scope_code_window_version")
+  @@index([computedAt], map: "ix_backtest_summary_computed_at")
+  @@index([ownerUserId, computedAt], map: "ix_backtest_summary_owner_computed")
+  @@map("backtest_summaries")
+}
+
+model AnalysisTask {
+  id             Int                @id @default(autoincrement())
+  ownerUserId    Int?               @map("owner_user_id")
+  taskId         String             @unique @map("task_id") @db.VarChar(64)
+  stockCode      String             @map("stock_code") @db.VarChar(16)
+  reportType     String             @map("report_type") @default("detailed") @db.VarChar(16)
+  status         AnalysisTaskStatus @default(pending)
+  progress       Int                @default(0)
+  message        String?            @db.VarChar(200)
+  resultQueryId  String?            @map("result_query_id") @db.VarChar(64)
+  error          String?            @db.VarChar(500)
+  requestPayload Json?              @map("request_payload")
+  resultPayload  Json?              @map("result_payload")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  startedAt      DateTime?          @map("started_at")
+  completedAt    DateTime?          @map("completed_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  ownerUser      AdminUser?         @relation("AnalysisTaskOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt], map: "ix_analysis_tasks_status_created")
+  @@index([stockCode, status], map: "ix_analysis_tasks_stock_status")
+  @@index([ownerUserId, createdAt], map: "ix_analysis_tasks_owner_created")
+  @@map("analysis_tasks")
+}
+
+model SystemConfigItem {
+  id           Int      @id @default(autoincrement())
+  key          String   @unique @db.VarChar(128)
+  value        String   @default("")
+  isSensitive  Boolean  @default(false) @map("is_sensitive")
+  category     String   @default("uncategorized") @db.VarChar(32)
+  dataType     String   @default("string") @map("data_type") @db.VarChar(16)
+  uiControl    String   @default("text") @map("ui_control") @db.VarChar(16)
+  displayOrder Int      @default(9999) @map("display_order")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([category, displayOrder], map: "ix_system_config_category_order")
+  @@map("system_config_items")
+}
+
+model SystemConfigRevision {
+  id        Int      @id @default(autoincrement())
+  version   String   @unique @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("system_config_revisions")
+}
+
+model AdminUser {
+  id           Int             @id @default(autoincrement())
+  username     String          @unique(map: "uix_admin_users_username") @db.VarChar(64)
+  passwordHash String          @map("password_hash")
+  displayName  String?         @map("display_name") @db.VarChar(64)
+  email        String?         @db.VarChar(128)
+  status       AdminUserStatus @default(active)
+  isDeleted    Boolean         @default(false) @map("is_deleted")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+  deletedAt    DateTime?       @map("deleted_at")
+  lastLoginAt  DateTime?       @map("last_login_at")
+
+  sessions  AdminSession[]
+  userRoles AdminUserRole[]
+  auditLogs AdminAuditLog[]
+  profile   AdminUserProfile?
+  ownedAnalysisTasks      AnalysisTask[]    @relation("AnalysisTaskOwner")
+  ownedAnalysisHistory    AnalysisHistory[] @relation("AnalysisHistoryOwner")
+  ownedNews               NewsIntel[]       @relation("NewsIntelOwner")
+  ownedBacktestResults    BacktestResult[]  @relation("BacktestResultOwner")
+  ownedBacktestSummaries  BacktestSummary[] @relation("BacktestSummaryOwner")
+  brokerAccounts          UserBrokerAccount[]
+  brokerSnapshotCaches    UserBrokerSnapshotCache[] @relation("BrokerSnapshotCacheUser")
+  agentCredentialTickets  AgentCredentialTicket[] @relation("AgentCredentialTicketUser")
+  agentExecutionEvents    AgentExecutionEvent[] @relation("AgentExecutionEventUser")
+  simulationPositions     SimulationPosition[]
+  simulationOrders        SimulationOrder[]
+  simulationTrades        SimulationTrade[]
+
+  @@index([status, isDeleted], map: "ix_admin_users_status_deleted")
+  @@map("admin_users")
+}
+
+model AdminUserProfile {
+  id                        Int      @id @default(autoincrement())
+  userId                    Int      @unique @map("user_id")
+  simulationAccountName     String   @default("") @map("simulation_account_name") @db.VarChar(128)
+  simulationAccountId       String   @default("") @map("simulation_account_id") @db.VarChar(128)
+  simulationInitialCapital  Float    @default(100000) @map("simulation_initial_capital")
+  simulationNote            String?  @map("simulation_note") @db.VarChar(255)
+  aiProvider                String   @default("openai") @map("ai_provider") @db.VarChar(32)
+  aiBaseUrl                 String   @default("https://api.openai.com/v1") @map("ai_base_url") @db.VarChar(255)
+  aiModel                   String   @default("gpt-4o-mini") @map("ai_model") @db.VarChar(128)
+  aiTokenCiphertext         String?  @map("ai_token_ciphertext")
+  aiTokenIv                 String?  @map("ai_token_iv") @db.VarChar(64)
+  aiTokenTag                String?  @map("ai_token_tag") @db.VarChar(64)
+  strategyPositionMaxPct    Float    @default(30) @map("strategy_position_max_pct")
+  strategyStopLossPct       Float    @default(8) @map("strategy_stop_loss_pct")
+  strategyTakeProfitPct     Float    @default(15) @map("strategy_take_profit_pct")
+  createdAt                 DateTime @default(now()) @map("created_at")
+  updatedAt                 DateTime @updatedAt @map("updated_at")
+
+  user AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("admin_user_profiles")
+}
+
+model AdminRole {
+  id          Int                   @id @default(autoincrement())
+  roleCode    String                @unique(map: "uix_admin_roles_code") @map("role_code") @db.VarChar(64)
+  roleName    String                @map("role_name") @db.VarChar(64)
+  description String?               @db.VarChar(255)
+  isBuiltin   Boolean               @default(false) @map("is_builtin")
+  isDeleted   Boolean               @default(false) @map("is_deleted")
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @updatedAt @map("updated_at")
+  deletedAt   DateTime?             @map("deleted_at")
+
+  userRoles    AdminUserRole[]
+  permissions  AdminRolePermission[]
+
+  @@index([isDeleted], map: "ix_admin_roles_deleted")
+  @@map("admin_roles")
+}
+
+model AdminUserRole {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  roleId    Int      @map("role_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role AdminRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId], map: "uix_admin_user_roles_user_role")
+  @@index([roleId], map: "ix_admin_user_roles_role_id")
+  @@map("admin_user_roles")
+}
+
+model AdminRolePermission {
+  id         Int      @id @default(autoincrement())
+  roleId     Int      @map("role_id")
+  moduleCode String   @map("module_code") @db.VarChar(64)
+  canRead    Boolean  @default(true) @map("can_read")
+  canWrite   Boolean  @default(false) @map("can_write")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  role AdminRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, moduleCode], map: "uix_admin_role_permissions_role_module")
+  @@index([moduleCode], map: "ix_admin_role_permissions_module")
+  @@map("admin_role_permissions")
+}
+
+model AdminSession {
+  id        Int      @id @default(autoincrement())
+  sessionId String   @unique(map: "uix_admin_sessions_session_id") @map("session_id") @db.VarChar(128)
+  userId    Int      @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  ip        String?  @db.VarChar(64)
+  userAgent String?  @map("user_agent") @db.VarChar(255)
+
+  user AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt], map: "ix_admin_sessions_expires_at")
+  @@index([userId], map: "ix_admin_sessions_user_id")
+  @@map("admin_sessions")
+}
+
+model AdminLoginRateLimit {
+  id            Int      @id @default(autoincrement())
+  ip            String   @db.VarChar(64)
+  username      String   @db.VarChar(64)
+  failureCount  Int      @default(0) @map("failure_count")
+  firstFailedAt DateTime @map("first_failed_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@unique([ip, username], map: "uix_admin_login_rate_limits_ip_username")
+  @@index([updatedAt], map: "ix_admin_login_rate_limits_updated_at")
+  @@map("admin_login_rate_limits")
+}
+
+model AdminAuditLog {
+  id                 Int              @id @default(autoincrement())
+  requestId          String?          @map("request_id") @db.VarChar(64)
+  userId             Int?             @map("user_id")
+  usernameSnapshot   String?          @map("username_snapshot") @db.VarChar(64)
+  method             String           @db.VarChar(8)
+  path               String           @db.VarChar(255)
+  moduleCode         String?          @map("module_code") @db.VarChar(64)
+  action             AdminAuditAction
+  statusCode         Int              @map("status_code")
+  success            Boolean          @default(false)
+  durationMs         Int              @map("duration_ms")
+  ip                 String?          @db.VarChar(64)
+  userAgent          String?          @map("user_agent") @db.VarChar(255)
+  queryMaskedJson    String?          @map("query_masked_json")
+  bodyMaskedJson     String?          @map("body_masked_json")
+  responseMaskedJson String?          @map("response_masked_json")
+  errorCode          String?          @map("error_code") @db.VarChar(64)
+  createdAt          DateTime         @default(now()) @map("created_at")
+
+  user AdminUser? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt], map: "ix_admin_audit_logs_created_at")
+  @@index([moduleCode], map: "ix_admin_audit_logs_module_code")
+  @@index([userId], map: "ix_admin_audit_logs_user_id")
+  @@index([statusCode], map: "ix_admin_audit_logs_status_code")
+  @@map("admin_audit_logs")
+}
+
+model UserBrokerAccount {
+  id                  Int                    @id @default(autoincrement())
+  userId              Int                    @map("user_id")
+  brokerCode          String                 @map("broker_code") @db.VarChar(32)
+  environment         BrokerEnvironment      @default(paper)
+  accountUid          String                 @map("account_uid") @db.VarChar(128)
+  accountDisplayName  String?                @map("account_display_name") @db.VarChar(128)
+  credentialCiphertext String                @map("credential_ciphertext")
+  credentialIv        String                 @map("credential_iv") @db.VarChar(64)
+  credentialTag       String                 @map("credential_tag") @db.VarChar(64)
+  status              UserBrokerAccountStatus @default(active)
+  isVerified          Boolean                @default(false) @map("is_verified")
+  lastVerifiedAt      DateTime?              @map("last_verified_at")
+  createdAt           DateTime               @default(now()) @map("created_at")
+  updatedAt           DateTime               @updatedAt @map("updated_at")
+  deletedAt           DateTime?              @map("deleted_at")
+
+  user               AdminUser               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  snapshotCaches     UserBrokerSnapshotCache[]
+  credentialTickets  AgentCredentialTicket[]
+  executionEvents    AgentExecutionEvent[]
+  simulationPositions SimulationPosition[]
+  simulationOrders   SimulationOrder[]
+  simulationTrades  SimulationTrade[]
+
+  @@unique([userId, brokerCode, accountUid], map: "uix_user_broker_accounts_user_broker_uid")
+  @@index([userId, status], map: "ix_user_broker_accounts_user_status")
+  @@index([deletedAt], map: "ix_user_broker_accounts_deleted_at")
+  @@map("user_broker_accounts")
+}
+
+model UserBrokerSnapshotCache {
+  id             Int      @id @default(autoincrement())
+  userId         Int      @map("user_id")
+  brokerAccountId Int     @map("broker_account_id")
+  summaryJson    String?  @map("summary_json")
+  positionsJson  String?  @map("positions_json")
+  ordersJson     String?  @map("orders_json")
+  tradesJson     String?  @map("trades_json")
+  performanceJson String? @map("performance_json")
+  snapshotAt     DateTime @map("snapshot_at")
+  expiresAt      DateTime @map("expires_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user          AdminUser          @relation("BrokerSnapshotCacheUser", fields: [userId], references: [id], onDelete: Cascade)
+  brokerAccount UserBrokerAccount  @relation(fields: [brokerAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, brokerAccountId], map: "uix_user_broker_snapshot_user_account")
+  @@index([expiresAt], map: "ix_user_broker_snapshot_expires_at")
+  @@index([userId, expiresAt], map: "ix_user_broker_snapshot_user_expires")
+  @@map("user_broker_snapshot_cache")
+}
+
+model AgentCredentialTicket {
+  id             Int                 @id @default(autoincrement())
+  ticketHash     String              @unique(map: "uix_agent_credential_tickets_hash") @map("ticket_hash") @db.VarChar(128)
+  userId         Int                 @map("user_id")
+  brokerAccountId Int                @map("broker_account_id")
+  scope          AgentCredentialScope @default(read)
+  taskId         String?             @map("task_id") @db.VarChar(64)
+  expiresAt      DateTime            @map("expires_at")
+  consumedAt     DateTime?           @map("consumed_at")
+  createdAt      DateTime            @default(now()) @map("created_at")
+
+  user          AdminUser         @relation("AgentCredentialTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  brokerAccount UserBrokerAccount @relation(fields: [brokerAccountId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt], map: "ix_agent_credential_tickets_expires_at")
+  @@index([userId, createdAt], map: "ix_agent_credential_tickets_user_created")
+  @@index([brokerAccountId, createdAt], map: "ix_agent_credential_tickets_account_created")
+  @@map("agent_credential_tickets")
+}
+
+model AgentExecutionEvent {
+  id             Int      @id @default(autoincrement())
+  userId         Int      @map("user_id")
+  brokerAccountId Int     @map("broker_account_id")
+  taskId         String?  @map("task_id") @db.VarChar(64)
+  eventType      String   @map("event_type") @db.VarChar(64)
+  payloadJson    String?  @map("payload_json")
+  status         String   @default("received") @db.VarChar(32)
+  errorCode      String?  @map("error_code") @db.VarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user          AdminUser         @relation("AgentExecutionEventUser", fields: [userId], references: [id], onDelete: Cascade)
+  brokerAccount UserBrokerAccount @relation(fields: [brokerAccountId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt], map: "ix_agent_execution_events_user_created")
+  @@index([brokerAccountId, createdAt], map: "ix_agent_execution_events_account_created")
+  @@index([taskId], map: "ix_agent_execution_events_task_id")
+  @@map("agent_execution_events")
+}
+
+model AuthCredential {
+  id          Int      @id
+  passwordHash String  @map("password_hash")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("auth_credentials")
+}
+
+model AuthSession {
+  id        Int      @id @default(autoincrement())
+  sessionId String   @unique @map("session_id") @db.VarChar(128)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([expiresAt], map: "ix_auth_sessions_expires_at")
+  @@map("auth_sessions")
+}
+
+model AuthRateLimit {
+  id            Int      @id @default(autoincrement())
+  ip            String   @unique @db.VarChar(64)
+  failureCount  Int      @default(0) @map("failure_count")
+  firstFailedAt DateTime @map("first_failed_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("auth_rate_limits")
+}
+
+model StockDaily {
+  id         Int      @id @default(autoincrement())
+  code       String   @db.VarChar(10)
+  date       DateTime @db.Date
+  open       Float?
+  high       Float?
+  low        Float?
+  close      Float?
+  volume     Float?
+  amount     Float?
+  pctChg     Float?   @map("pct_chg")
+  ma5        Float?
+  ma10       Float?
+  ma20       Float?
+  volumeRatio Float?  @map("volume_ratio")
+  dataSource String?  @map("data_source") @db.VarChar(50)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([code, date], map: "uix_code_date")
+  @@index([code, date], map: "ix_code_date")
+  @@map("stock_daily")
+}
+
+model MigrationCheckpoint {
+  id        Int      @id @default(autoincrement())
+  key       String   @unique @db.VarChar(128)
+  value     String   @default("")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("migration_checkpoints")
+}
+
+model SimulationPosition {
+  id                Int      @id @default(autoincrement())
+  userId            Int      @map("user_id")
+  brokerAccountId   Int      @map("broker_account_id")
+  stockCode         String   @map("stock_code") @db.VarChar(10)
+  stockName         String?  @map("stock_name") @db.VarChar(50)
+  quantity          Float    @default(0) @map("quantity")
+  costBasis         Float    @default(0) @map("cost_basis")
+  avgCost           Float    @default(0) @map("avg_cost")
+  marketValue       Float    @default(0) @map("market_value")
+  unrealizedPnl     Float    @default(0) @map("unrealized_pnl")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user          AdminUser         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brokerAccount UserBrokerAccount @relation(fields: [brokerAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, brokerAccountId, stockCode], map: "uix_simulation_position_user_broker_stock")
+  @@index([userId, brokerAccountId], map: "ix_simulation_position_user_broker")
+  @@index([stockCode], map: "ix_simulation_position_stock_code")
+  @@map("simulation_positions")
+}
+
+model SimulationOrder {
+  id                Int                    @id @default(autoincrement())
+  userId            Int                    @map("user_id")
+  brokerAccountId   Int                    @map("broker_account_id")
+  orderId           String                 @unique @map("order_id") @db.VarChar(64)
+  stockCode         String                 @map("stock_code") @db.VarChar(10)
+  stockName         String?                @map("stock_name") @db.VarChar(50)
+  direction         SimulationOrderDirection @map("direction")
+  type              SimulationOrderType   @default(limit) @map("type")
+  price             Float                  @map("price")
+  quantity          Float                  @map("quantity")
+  filledQuantity    Float                  @default(0) @map("filled_quantity")
+  filledPrice      Float?                 @map("filled_price")
+  status            SimulationOrderStatus  @default(pending) @map("status")
+  errorMessage      String?                @map("error_message") @db.VarChar(255)
+  createdAt         DateTime               @default(now()) @map("created_at")
+  updatedAt         DateTime               @updatedAt @map("updated_at")
+
+  user          AdminUser         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brokerAccount UserBrokerAccount @relation(fields: [brokerAccountId], references: [id], onDelete: Cascade)
+
+  @@index([userId, brokerAccountId], map: "ix_simulation_order_user_broker")
+  @@index([stockCode], map: "ix_simulation_order_stock_code")
+  @@index([status], map: "ix_simulation_order_status")
+  @@index([createdAt], map: "ix_simulation_order_created_at")
+  @@map("simulation_orders")
+}
+
+model SimulationTrade {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @map("user_id")
+  brokerAccountId Int      @map("broker_account_id")
+  tradeId         String   @unique @map("trade_id") @db.VarChar(64)
+  orderId         String   @map("order_id") @db.VarChar(64)
+  stockCode       String   @map("stock_code") @db.VarChar(10)
+  stockName       String?  @map("stock_name") @db.VarChar(50)
+  direction       SimulationOrderDirection @map("direction")
+  price           Float    @map("price")
+  quantity        Float    @map("quantity")
+  amount          Float    @map("amount")
+  fee             Float    @default(0) @map("fee")
+  tradedAt        DateTime @default(now()) @map("traded_at")
+
+  user          AdminUser          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brokerAccount UserBrokerAccount  @relation(fields: [brokerAccountId], references: [id], onDelete: Cascade)
+
+  @@index([userId, brokerAccountId], map: "ix_simulation_trade_user_broker")
+  @@index([stockCode], map: "ix_simulation_trade_stock_code")
+  @@index([tradedAt], map: "ix_simulation_trade_traded_at")
+  @@map("simulation_trades")
+}
