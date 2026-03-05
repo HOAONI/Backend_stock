@@ -1,11 +1,15 @@
-export type AgentExecutionMode = 'paper' | 'broker';
+export type AgentExecutionMode = 'paper';
 
 export interface AgentRuntimeExecutionConfig {
   mode: AgentExecutionMode;
   has_ticket: boolean;
-  credential_ticket?: string;
-  ticket_id?: number;
   broker_account_id?: number;
+}
+
+export interface AgentRuntimeContext {
+  account_snapshot?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+  positions?: Array<Record<string, unknown>>;
 }
 
 export interface AgentRuntimeConfig {
@@ -27,6 +31,7 @@ export interface AgentRuntimeConfig {
     take_profit_pct: number;
   };
   execution?: AgentRuntimeExecutionConfig;
+  context?: AgentRuntimeContext;
 }
 
 export interface AgentBridgeMeta {

@@ -2,6 +2,12 @@
 
 Use `pnpm migrate:sqlite` to migrate legacy SQLite data into PostgreSQL.
 
+Prisma schema migrations are versioned under `prisma/migrations/`.
+
+- Baseline migration id: `20260305074500_baseline`
+- Fresh DB deploy: `pnpm prisma:deploy`
+- Existing DB already created by `db push`: run `pnpm exec prisma migrate resolve --applied 20260305074500_baseline` once
+
 Core migrated tables:
 
 - analysis_history

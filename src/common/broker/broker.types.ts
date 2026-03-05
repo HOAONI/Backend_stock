@@ -5,6 +5,8 @@ export interface BrokerAccessContext {
   environment: 'paper' | 'simulation';
   accountUid: string;
   accountDisplayName: string | null;
+  providerCode?: string | null;
+  providerName?: string | null;
   credentials: Record<string, unknown>;
 }
 
@@ -15,8 +17,21 @@ export interface BrokerAdapter {
   getPositions(context: BrokerAccessContext): Promise<Array<Record<string, unknown>>>;
   getOrders(context: BrokerAccessContext): Promise<Array<Record<string, unknown>>>;
   getTrades(context: BrokerAccessContext): Promise<Array<Record<string, unknown>>>;
-  placeOrder?(context: BrokerAccessContext, order: OrderRequest): Promise<Record<string, unknown>>;
-  cancelOrder?(context: BrokerAccessContext, orderId: string): Promise<Record<string, unknown>>;
+  placeOrder?(
+    context: BrokerAccessContext,
+    order: OrderRequest,
+    options?: { idempotencyKey?: string | null; payload?: Record<string, unknown> | null },
+  ): Promise<Record<string, unknown>>;
+  cancelOrder?(
+    context: BrokerAccessContext,
+    orderId: string,
+    options?: { idempotencyKey?: string | null; payload?: Record<string, unknown> | null },
+  ): Promise<Record<string, unknown>>;
+  addFunds?(
+    context: BrokerAccessContext,
+    input: AddFundsRequest,
+    options?: { idempotencyKey?: string | null; payload?: Record<string, unknown> | null },
+  ): Promise<Record<string, unknown>>;
 }
 
 export interface OrderRequest {
@@ -37,11 +52,20 @@ export interface OrderResponse {
   message?: string;
 }
 
+export interface AddFundsRequest {
+  amount: number;
+  note?: string;
+}
+
 export interface GatewayRequestPayload {
   user_id: number;
   broker_account_id: number;
   environment: string;
   account_uid: string;
   account_display_name: string | null;
+  provider_code?: string | null;
+  provider_name?: string | null;
+  payload?: Record<string, unknown>;
+  idempotency_key?: string | null;
   credentials: Record<string, unknown>;
 }

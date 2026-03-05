@@ -1,16 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 
-import { AnalysisTaskStatus, Prisma, UserBrokerAccountStatus } from '@prisma/client';
+import { AnalysisTaskStatus, Prisma } from '@prisma/client';
 
-import { AgentExecutionMode, AgentRunPayload, AgentRuntimeConfig } from '@/common/agent/agent.types';
+import { AgentExecutionMode, AgentRuntimeConfig, AgentRuntimeContext } from '@/common/agent/agent.types';
 import { AgentRunBridgeService } from '@/common/agent/agent-run-bridge.service';
 import { buildRuntimeConfigFromProfile, maskRuntimeConfig } from '@/common/agent/runtime-config.builder';
 import { PrismaService } from '@/common/database/prisma.service';
 import { PersonalCryptoService } from '@/common/security/personal-crypto.service';
 import { safeJsonParse } from '@/common/utils/json';
 import { canonicalStockCode } from '@/common/utils/stock-code';
-import { AgentBridgeService } from '@/modules/agent-bridge/agent-bridge.service';
+import { BrokerAccountsService } from '@/modules/broker-accounts/broker-accounts.service';
+import { TradingAccountService, TradingRuntimeContextPayload } from '@/modules/trading-account/trading-account.service';
 
 import { AnalyzeRequestDto } from './analysis.dto';
 import { mapAgentRunToAnalysis } from './analysis.mapper';
@@ -43,26 +44,11 @@ export interface AnalysisBrokerMeta {
   execution_mode: AgentExecutionMode;
   requested_execution_mode: RequestedExecutionMode;
   broker_account_id: number | null;
-  credential_ticket_id: number | null;
+  auto_order_enabled: boolean;
   broker_plan_reason: string;
 }
 
-type RequestedExecutionMode = 'auto' | 'paper' | 'broker';
-
-interface IssuedTradeTicket {
-  ticket: string;
-  ticketId: number;
-}
-
-interface ServiceError extends Error {
-  code?: string;
-}
-
-function createServiceError(code: string, message: string): ServiceError {
-  const error = new Error(message) as ServiceError;
-  error.code = code;
-  return error;
-}
+type RequestedExecutionMode = 'auto' | 'paper';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -74,6 +60,14 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function asPositiveInt(value: unknown): number | null {
   const n = Number(value);
   if (!Number.isInteger(n) || n <= 0) {
+    return null;
+  }
+  return n;
+}
+
+function asNumber(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
     return null;
   }
   return n;
@@ -92,7 +86,8 @@ export class AnalysisService {
     private readonly prisma: PrismaService,
     private readonly agentRunBridge: AgentRunBridgeService,
     private readonly personalCrypto: PersonalCryptoService,
-    private readonly agentBridgeService: AgentBridgeService,
+    private readonly brokerAccountsService: BrokerAccountsService,
+    private readonly tradingAccountService: TradingAccountService,
   ) {}
 
   normalizeRequest(request: AnalyzeRequestDto): {
@@ -100,7 +95,6 @@ export class AnalysisService {
     reportType: string;
     forceRefresh: boolean;
     executionMode: RequestedExecutionMode;
-    brokerAccountId: number | null;
   } {
     const codes = [
       ...(request.stock_code ? [request.stock_code] : []),
@@ -115,18 +109,26 @@ export class AnalysisService {
       (error as Error & { code: string }).code = 'VALIDATION_ERROR';
       throw error;
     }
+    if (dedup.length > 1) {
+      const error = new Error('当前接口仅支持单股票分析，请仅传入一个 stock_code');
+      (error as Error & { code: string }).code = 'VALIDATION_ERROR';
+      throw error;
+    }
 
     return {
       stockCode: dedup[0],
       reportType: request.report_type ?? 'detailed',
       forceRefresh: Boolean(request.force_refresh),
       executionMode: request.execution_mode ?? 'auto',
-      brokerAccountId: request.broker_account_id ?? null,
     };
   }
 
   private shouldForwardRuntimeConfig(): boolean {
     return (process.env.AGENT_FORWARD_RUNTIME_CONFIG ?? 'false').toLowerCase() === 'true';
+  }
+
+  private isAutoOrderEnabled(): boolean {
+    return (process.env.ANALYSIS_AUTO_ORDER_ENABLED ?? 'true').toLowerCase() === 'true';
   }
 
   private decryptProfileToken(profile: {
@@ -178,7 +180,7 @@ export class AnalysisService {
 
   private parseRequestedExecutionMode(value: unknown): RequestedExecutionMode {
     const raw = String(value ?? '').trim().toLowerCase();
-    if (raw === 'paper' || raw === 'broker') {
+    if (raw === 'paper') {
       return raw;
     }
     return 'auto';
@@ -190,201 +192,99 @@ export class AnalysisService {
       llm: { ...runtimeConfig.llm },
       strategy: { ...runtimeConfig.strategy },
       execution: runtimeConfig.execution ? { ...runtimeConfig.execution } : undefined,
+      context: runtimeConfig.context
+        ? {
+            account_snapshot: runtimeConfig.context.account_snapshot ? { ...runtimeConfig.context.account_snapshot } : undefined,
+            summary: runtimeConfig.context.summary ? { ...runtimeConfig.context.summary } : undefined,
+            positions: runtimeConfig.context.positions?.map((item) => ({ ...item })),
+          }
+        : undefined,
+    };
+  }
+
+  private buildAgentRuntimeContext(payload: TradingRuntimeContextPayload): AgentRuntimeContext {
+    const summary = asRecord(payload.summary) ?? {};
+    const positions = Array.isArray(payload.positions) ? payload.positions.map((item) => ({ ...item })) : [];
+    const cash = asNumber(summary.cash ?? summary.available_cash ?? summary.availableCash) ?? 0;
+    const marketValue = asNumber(summary.market_value ?? summary.total_market_value ?? summary.marketValue) ?? 0;
+    const totalAsset = asNumber(summary.total_asset ?? summary.totalAsset ?? summary.total_equity) ?? (cash + marketValue);
+
+    return {
+      summary,
+      positions,
+      account_snapshot: {
+        broker_account_id: payload.broker_account_id,
+        broker_code: payload.broker_code,
+        provider_code: payload.provider_code,
+        provider_name: payload.provider_name,
+        account_uid: payload.account_uid,
+        account_display_name: payload.account_display_name,
+        snapshot_at: payload.snapshot_at,
+        data_source: payload.data_source,
+        cash,
+        total_market_value: marketValue,
+        total_asset: totalAsset,
+        positions,
+      },
+    };
+  }
+
+  private async attachTradingRuntimeContext(userId: number, runtimeConfig: AgentRuntimeConfig): Promise<AgentRuntimeConfig> {
+    const tradingRuntime = await this.tradingAccountService.getRuntimeContext(userId, true);
+    return {
+      ...runtimeConfig,
+      context: this.buildAgentRuntimeContext(tradingRuntime),
     };
   }
 
   async resolveExecutionPlan(
     userId: number,
     requestedModeInput?: string | null,
-    brokerAccountIdInput?: number | null,
   ): Promise<AnalysisBrokerMeta> {
     const requestedMode = this.parseRequestedExecutionMode(requestedModeInput);
-    const requestedBrokerAccountId = brokerAccountIdInput == null ? null : asPositiveInt(brokerAccountIdInput);
-    if (brokerAccountIdInput != null && !requestedBrokerAccountId) {
-      throw createServiceError('VALIDATION_ERROR', 'broker_account_id 必须为正整数');
-    }
-
-    if (requestedMode === 'paper') {
-      return {
-        execution_mode: 'paper',
-        requested_execution_mode: requestedMode,
-        broker_account_id: null,
-        credential_ticket_id: null,
-        broker_plan_reason: 'forced_paper',
-      };
-    }
-
-    const brokerAccount = await this.prisma.userBrokerAccount.findFirst({
-      where: {
-        userId,
-        id: requestedBrokerAccountId ?? undefined,
-        deletedAt: null,
-        status: UserBrokerAccountStatus.active,
-        isVerified: true,
-      },
-      orderBy: [{ isVerified: 'desc' }, { updatedAt: 'desc' }, { id: 'desc' }],
-      select: { id: true },
-    });
-
-    if (requestedMode === 'broker') {
-      if (!brokerAccount) {
-        throw createServiceError('VALIDATION_ERROR', '指定 broker 模式但未找到可用且已校验的券商账户');
-      }
-      return {
-        execution_mode: 'broker',
-        requested_execution_mode: requestedMode,
-        broker_account_id: brokerAccount.id,
-        credential_ticket_id: null,
-        broker_plan_reason: requestedBrokerAccountId ? 'forced_broker_selected_account' : 'forced_broker_auto_pick',
-      };
-    }
-
-    if (requestedBrokerAccountId && !brokerAccount) {
-      throw createServiceError('VALIDATION_ERROR', `broker_account_id=${requestedBrokerAccountId} 不可用或尚未 verify`);
-    }
-
-    if (brokerAccount) {
-      return {
-        execution_mode: 'broker',
-        requested_execution_mode: requestedMode,
-        broker_account_id: brokerAccount.id,
-        credential_ticket_id: null,
-        broker_plan_reason: requestedBrokerAccountId ? 'auto_verified_selected_account' : 'auto_verified_account',
-      };
-    }
-
+    const access = await this.brokerAccountsService.resolveSimulationAccess(userId, { requireVerified: true });
+    const autoOrderEnabled = requestedMode === 'auto' && this.isAutoOrderEnabled();
     return {
       execution_mode: 'paper',
       requested_execution_mode: requestedMode,
-      broker_account_id: null,
-      credential_ticket_id: null,
-      broker_plan_reason: 'auto_no_verified_account',
+      broker_account_id: access.brokerAccountId,
+      auto_order_enabled: autoOrderEnabled,
+      broker_plan_reason: requestedMode === 'paper' ? 'paper_analysis_only' : 'auto_submit_backtrader_local',
     };
   }
 
   resolveExecutionMetaFromPayload(requestPayload: unknown): AnalysisBrokerMeta {
     const payload = asRecord(requestPayload);
     const meta = asRecord(payload?.meta);
-    const executionMode = String(meta?.execution_mode ?? '').trim().toLowerCase() === 'broker' ? 'broker' : 'paper';
+    const executionMode: AgentExecutionMode = 'paper';
     const requestedMode = this.parseRequestedExecutionMode(meta?.requested_execution_mode ?? meta?.execution_mode ?? 'auto');
     const brokerAccountId = asPositiveInt(meta?.broker_account_id);
-    const credentialTicketId = asPositiveInt(meta?.credential_ticket_id);
+    const autoOrderEnabled = Boolean(meta?.auto_order_enabled ?? (requestedMode === 'auto' ? this.isAutoOrderEnabled() : false));
     const reason = String(meta?.broker_plan_reason ?? '').trim() || 'legacy_default';
 
     return {
       execution_mode: executionMode,
       requested_execution_mode: requestedMode,
       broker_account_id: brokerAccountId,
-      credential_ticket_id: credentialTicketId,
+      auto_order_enabled: autoOrderEnabled,
       broker_plan_reason: reason,
     };
   }
 
   buildRuntimeConfigForExecution(
     runtimeConfig: AgentRuntimeConfig,
-    executionMeta: Pick<AnalysisBrokerMeta, 'execution_mode' | 'broker_account_id' | 'credential_ticket_id'>,
-    options?: { credentialTicket?: string | null; ticketId?: number | null },
+    executionMeta: Pick<AnalysisBrokerMeta, 'execution_mode' | 'broker_account_id'>,
   ): AgentRuntimeConfig {
     const cloned = this.cloneRuntimeConfig(runtimeConfig);
-    const credentialTicket = String(options?.credentialTicket ?? '').trim();
-    const ticketId = asPositiveInt(options?.ticketId ?? executionMeta.credential_ticket_id);
     const brokerAccountId = asPositiveInt(executionMeta.broker_account_id);
 
     cloned.execution = {
-      mode: executionMeta.execution_mode,
-      has_ticket: Boolean(credentialTicket),
-      ...(credentialTicket ? { credential_ticket: credentialTicket } : {}),
-      ...(ticketId ? { ticket_id: ticketId } : {}),
+      mode: 'paper',
+      has_ticket: false,
       ...(brokerAccountId ? { broker_account_id: brokerAccountId } : {}),
     };
 
     return cloned;
-  }
-
-  async issueTradeCredentialTicket(input: {
-    userId: number;
-    brokerAccountId: number;
-    taskId: string;
-  }): Promise<IssuedTradeTicket> {
-    const brokerAccountId = asPositiveInt(input.brokerAccountId);
-    if (!brokerAccountId) {
-      throw createServiceError('VALIDATION_ERROR', '签发交易票据失败：缺少 broker_account_id');
-    }
-
-    const response = await this.agentBridgeService.issueCredentialTicket({
-      user_id: input.userId,
-      broker_account_id: brokerAccountId,
-      scope: 'trade',
-      task_id: input.taskId,
-    });
-
-    const ticket = String(response.ticket ?? '').trim();
-    const ticketId = asPositiveInt(response.ticket_id);
-    if (!ticket || !ticketId) {
-      throw createServiceError('VALIDATION_ERROR', '签发交易票据响应异常：缺少 ticket 或 ticket_id');
-    }
-
-    return {
-      ticket,
-      ticketId,
-    };
-  }
-
-  async updateTaskCredentialTicketMeta(taskRowId: number, ticketId: number): Promise<void> {
-    const safeTicketId = asPositiveInt(ticketId);
-    if (!safeTicketId) {
-      return;
-    }
-
-    const task = await this.prisma.analysisTask.findUnique({
-      where: { id: taskRowId },
-      select: { requestPayload: true },
-    });
-    if (!task) {
-      return;
-    }
-
-    const payload = asRecord(task.requestPayload) ?? {};
-    const meta = asRecord(payload.meta) ?? {};
-    const mergedPayload = {
-      ...payload,
-      meta: {
-        ...meta,
-        credential_ticket_id: safeTicketId,
-      },
-    };
-
-    await this.prisma.analysisTask.update({
-      where: { id: taskRowId },
-      data: {
-        requestPayload: mergedPayload as unknown as Prisma.InputJsonValue,
-      },
-    });
-  }
-
-  assertBrokerExecutionSucceeded(run: AgentRunPayload, stockCode: string): void {
-    const root = asRecord(run.execution_snapshot);
-    if (!root) {
-      throw createServiceError('broker_execution_degraded', 'Agent 未返回 execution_snapshot，无法确认 broker 执行结果');
-    }
-
-    const byCode = asRecord(root[stockCode]);
-    const snapshot = byCode ?? root;
-
-    const executedVia = String(snapshot.executed_via ?? snapshot.executedVia ?? '').trim().toLowerCase();
-    const fallbackReason = String(snapshot.fallback_reason ?? snapshot.fallbackReason ?? '').trim();
-    const errorMessage = String(snapshot.error_message ?? snapshot.errorMessage ?? '').trim();
-
-    if (executedVia !== 'broker' || fallbackReason || errorMessage) {
-      const detail = [
-        executedVia ? `executed_via=${executedVia}` : 'executed_via=unknown',
-        fallbackReason ? `fallback_reason=${fallbackReason}` : null,
-        errorMessage ? `error=${errorMessage}` : null,
-      ]
-        .filter(Boolean)
-        .join(', ');
-      throw createServiceError('broker_execution_degraded', `真实执行未达成：${detail || 'agent returned degraded execution'}`);
-    }
   }
 
   async runSync(input: {
@@ -392,37 +292,24 @@ export class AnalysisService {
     reportType: string;
     userId: number;
     executionMode?: RequestedExecutionMode;
-    brokerAccountId?: number | null;
   }): Promise<Record<string, unknown>> {
     const runtime = await this.buildRuntimeContext(input.userId, {
       includeApiToken: this.shouldForwardRuntimeConfig(),
     });
-    const executionMeta = await this.resolveExecutionPlan(input.userId, input.executionMode, input.brokerAccountId);
+    const executionMeta = await this.resolveExecutionPlan(input.userId, input.executionMode);
     const runRequestId = randomUUID().replace(/-/g, '');
 
-    let runtimeConfig = this.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta);
-    let forceRuntimeConfig = false;
-    if (executionMeta.execution_mode === 'broker') {
-      const issued = await this.issueTradeCredentialTicket({
-        userId: input.userId,
-        brokerAccountId: executionMeta.broker_account_id as number,
-        taskId: runRequestId,
-      });
-      runtimeConfig = this.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta, {
-        credentialTicket: issued.ticket,
-        ticketId: issued.ticketId,
-      });
-      forceRuntimeConfig = true;
-    }
+    const runtimeConfig = await this.attachTradingRuntimeContext(
+      input.userId,
+      this.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta),
+    );
 
     const bridgeResult = await this.agentRunBridge.runViaAsyncTask([input.stockCode], runRequestId, {
       accountName: runtime.accountName,
       runtimeConfig,
-      forceRuntimeConfig,
-    });
-    if (executionMeta.execution_mode === 'broker') {
-      this.assertBrokerExecutionSucceeded(bridgeResult.run, input.stockCode);
+      forceRuntimeConfig: true,
     }
+    );
     const mapped = mapAgentRunToAnalysis(bridgeResult.run, input.stockCode, input.reportType);
 
     await this.prisma.analysisHistory.create({
@@ -461,10 +348,9 @@ export class AnalysisService {
     forceRefresh: boolean;
     userId: number;
     executionMode?: RequestedExecutionMode;
-    brokerAccountId?: number | null;
   }): Promise<Record<string, unknown>> {
     const runtime = await this.buildRuntimeContext(input.userId);
-    const executionMeta = await this.resolveExecutionPlan(input.userId, input.executionMode, input.brokerAccountId);
+    const executionMeta = await this.resolveExecutionPlan(input.userId, input.executionMode);
     const maskedRuntime = maskRuntimeConfig(this.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta));
     const existing = await this.prisma.analysisTask.findFirst({
       where: {

@@ -64,7 +64,7 @@ model AnalysisHistory {
   name             String?   @db.VarChar(50)
   reportType       String?   @map("report_type") @db.VarChar(16)
   sentimentScore   Int?      @map("sentiment_score")
-  operationAdvice  String?   @map("operation_advice") @db.VarChar(20)
+  operationAdvice  String?   @map("operation_advice") @db.VarChar(128)
   trendPrediction  String?   @map("trend_prediction") @db.VarChar(50)
   analysisSummary  String?   @map("analysis_summary")
   rawResult        String?   @map("raw_result")
@@ -124,9 +124,9 @@ model BacktestResult {
   analysisDate        DateTime? @map("analysis_date") @db.Date
   evalWindowDays      Int       @default(10) @map("eval_window_days")
   engineVersion       String    @default("v1") @map("engine_version") @db.VarChar(16)
-  evalStatus          String    @default("pending") @map("eval_status") @db.VarChar(16)
+  evalStatus          String    @default("pending") @map("eval_status") @db.VarChar(32)
   evaluatedAt         DateTime  @default(now()) @map("evaluated_at")
-  operationAdvice     String?   @map("operation_advice") @db.VarChar(20)
+  operationAdvice     String?   @map("operation_advice") @db.VarChar(128)
   positionRecommendation String? @map("position_recommendation") @db.VarChar(8)
   startPrice          Float?    @map("start_price")
   endClose            Float?    @map("end_close")
@@ -175,6 +175,8 @@ model BacktestSummary {
   lossCount            Int       @default(0) @map("loss_count")
   neutralCount         Int       @default(0) @map("neutral_count")
   directionAccuracyPct Float?    @map("direction_accuracy_pct")
+  predictionWinRatePct Float?    @map("prediction_win_rate_pct")
+  tradeWinRatePct      Float?    @map("trade_win_rate_pct")
   winRatePct           Float?    @map("win_rate_pct")
   neutralRatePct       Float?    @map("neutral_rate_pct")
   avgStockReturnPct    Float?    @map("avg_stock_return_pct")
@@ -191,6 +193,77 @@ model BacktestSummary {
   @@index([computedAt], map: "ix_backtest_summary_computed_at")
   @@index([ownerUserId, computedAt], map: "ix_backtest_summary_owner_computed")
   @@map("backtest_summaries")
+}
+
+model StrategyBacktestRunGroup {
+  id                 Int       @id @default(autoincrement())
+  ownerUserId        Int?      @map("owner_user_id")
+  code               String    @db.VarChar(16)
+  startDate          DateTime  @map("start_date") @db.Date
+  endDate            DateTime  @map("end_date") @db.Date
+  effectiveStartDate DateTime? @map("effective_start_date") @db.Date
+  effectiveEndDate   DateTime? @map("effective_end_date") @db.Date
+  engineVersion      String    @default("backtrader_v1") @map("engine_version") @db.VarChar(32)
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  ownerUser          AdminUser?            @relation("StrategyBacktestRunGroupOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  runs               StrategyBacktestRun[]
+
+  @@index([ownerUserId, createdAt], map: "ix_strategy_backtest_group_owner_created")
+  @@index([code, startDate, endDate], map: "ix_strategy_backtest_group_code_range")
+  @@map("strategy_backtest_run_groups")
+}
+
+model StrategyBacktestRun {
+  id              Int       @id @default(autoincrement())
+  runGroupId      Int       @map("run_group_id")
+  strategyCode    String    @map("strategy_code") @db.VarChar(32)
+  strategyVersion String    @default("v1") @map("strategy_version") @db.VarChar(32)
+  paramsJson      Json?     @map("params_json")
+  metricsJson     Json?     @map("metrics_json")
+  benchmarkJson   Json?     @map("benchmark_json")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  runGroup        StrategyBacktestRunGroup  @relation(fields: [runGroupId], references: [id], onDelete: Cascade)
+  trades          StrategyBacktestTrade[]
+  equityPoints    StrategyBacktestEquityPoint[]
+
+  @@index([runGroupId, strategyCode], map: "ix_strategy_backtest_run_group_strategy")
+  @@map("strategy_backtest_runs")
+}
+
+model StrategyBacktestTrade {
+  id             Int       @id @default(autoincrement())
+  runId          Int       @map("run_id")
+  entryDate      DateTime? @map("entry_date") @db.Date
+  exitDate       DateTime? @map("exit_date") @db.Date
+  entryPrice     Float?    @map("entry_price")
+  exitPrice      Float?    @map("exit_price")
+  qty            Int?
+  grossReturnPct Float?    @map("gross_return_pct")
+  netReturnPct   Float?    @map("net_return_pct")
+  fees           Float?
+  exitReason     String?   @map("exit_reason") @db.VarChar(64)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  run            StrategyBacktestRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, entryDate], map: "ix_strategy_backtest_trade_run_entry")
+  @@map("strategy_backtest_trades")
+}
+
+model StrategyBacktestEquityPoint {
+  id              Int       @id @default(autoincrement())
+  runId           Int       @map("run_id")
+  tradeDate       DateTime  @map("trade_date") @db.Date
+  equity          Float
+  drawdownPct     Float?    @map("drawdown_pct")
+  benchmarkEquity Float?    @map("benchmark_equity")
+
+  run             StrategyBacktestRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, tradeDate], map: "ix_strategy_backtest_equity_run_date")
+  @@map("strategy_backtest_equity_points")
 }
 
 model AnalysisTask {
@@ -264,10 +337,12 @@ model AdminUser {
   ownedNews               NewsIntel[]       @relation("NewsIntelOwner")
   ownedBacktestResults    BacktestResult[]  @relation("BacktestResultOwner")
   ownedBacktestSummaries  BacktestSummary[] @relation("BacktestSummaryOwner")
+  ownedStrategyBacktestRunGroups StrategyBacktestRunGroup[] @relation("StrategyBacktestRunGroupOwner")
   brokerAccounts          UserBrokerAccount[]
   brokerSnapshotCaches    UserBrokerSnapshotCache[] @relation("BrokerSnapshotCacheUser")
   agentCredentialTickets  AgentCredentialTicket[] @relation("AgentCredentialTicketUser")
   agentExecutionEvents    AgentExecutionEvent[] @relation("AgentExecutionEventUser")
+  analysisAutoOrders      AnalysisAutoOrder[] @relation("AnalysisAutoOrderUser")
   simulationPositions     SimulationPosition[]
   simulationOrders        SimulationOrder[]
   simulationTrades        SimulationTrade[]
@@ -411,6 +486,8 @@ model UserBrokerAccount {
   id                  Int                    @id @default(autoincrement())
   userId              Int                    @map("user_id")
   brokerCode          String                 @map("broker_code") @db.VarChar(32)
+  providerCode        String                 @default("default") @map("provider_code") @db.VarChar(32)
+  providerName        String?                @map("provider_name") @db.VarChar(64)
   environment         BrokerEnvironment      @default(paper)
   accountUid          String                 @map("account_uid") @db.VarChar(128)
   accountDisplayName  String?                @map("account_display_name") @db.VarChar(128)
@@ -428,6 +505,7 @@ model UserBrokerAccount {
   snapshotCaches     UserBrokerSnapshotCache[]
   credentialTickets  AgentCredentialTicket[]
   executionEvents    AgentExecutionEvent[]
+  analysisAutoOrders AnalysisAutoOrder[] @relation("AnalysisAutoOrderBrokerAccount")
   simulationPositions SimulationPosition[]
   simulationOrders   SimulationOrder[]
   simulationTrades  SimulationTrade[]
@@ -499,6 +577,34 @@ model AgentExecutionEvent {
   @@index([brokerAccountId, createdAt], map: "ix_agent_execution_events_account_created")
   @@index([taskId], map: "ix_agent_execution_events_task_id")
   @@map("agent_execution_events")
+}
+
+model AnalysisAutoOrder {
+  id             Int      @id @default(autoincrement())
+  taskId         String   @map("task_id") @db.VarChar(64)
+  userId         Int      @map("user_id")
+  brokerAccountId Int     @map("broker_account_id")
+  stockCode      String   @map("stock_code") @db.VarChar(16)
+  direction      String   @db.VarChar(8)
+  type           String   @db.VarChar(16)
+  price          Float
+  quantity       Float
+  status         String   @default("pending") @db.VarChar(32)
+  providerOrderId String? @map("provider_order_id") @db.VarChar(128)
+  providerStatus String?  @map("provider_status") @db.VarChar(64)
+  errorCode      String?  @map("error_code") @db.VarChar(64)
+  errorMessage   String?  @map("error_message") @db.VarChar(500)
+  idempotencyKey String?  @unique(map: "uix_analysis_auto_orders_idempotency_key") @map("idempotency_key") @db.VarChar(128)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user          AdminUser         @relation("AnalysisAutoOrderUser", fields: [userId], references: [id], onDelete: Cascade)
+  brokerAccount UserBrokerAccount @relation("AnalysisAutoOrderBrokerAccount", fields: [brokerAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, stockCode], map: "uix_analysis_auto_orders_task_stock")
+  @@index([userId, createdAt], map: "ix_analysis_auto_orders_user_created")
+  @@index([brokerAccountId, createdAt], map: "ix_analysis_auto_orders_account_created")
+  @@map("analysis_auto_orders")
 }
 
 model AuthCredential {

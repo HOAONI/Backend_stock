@@ -1,7 +1,7 @@
-import { Controller, Get, Post, HttpException, HttpStatus, Query, Req, Body } from '@nestjs/common';
+import { Controller, Get, Post, HttpException, HttpStatus, Query, Req, Body, Headers } from '@nestjs/common';
 import { Request } from 'express';
 
-import { TradingAccountQueryDto, PlaceOrderDto, CancelOrderDto } from './trading-account.dto';
+import { AddFundsDto, TradingAccountQueryDto, PlaceOrderDto, CancelOrderDto } from './trading-account.dto';
 import { TradingAccountService } from './trading-account.service';
 
 interface ServiceError extends Error {
@@ -16,6 +16,12 @@ function toHttpException(error: unknown): HttpException {
   }
   if (err.code === 'VALIDATION_ERROR') {
     return new HttpException({ error: 'validation_error', message: err.message }, HttpStatus.BAD_REQUEST);
+  }
+  if (err.code === 'SIMULATION_ACCOUNT_REQUIRED') {
+    return new HttpException(
+      { error: 'simulation_account_required', message: err.message },
+      HttpStatus.PRECONDITION_FAILED,
+    );
   }
   if (err.code === 'UPSTREAM_ERROR') {
     return new HttpException(
@@ -52,7 +58,7 @@ export class TradingAccountController {
   async accountSummary(@Req() req: Request, @Query() query: TradingAccountQueryDto): Promise<Record<string, unknown>> {
     const userId = this.requireUserId(req);
     try {
-      return await this.tradingAccountService.getAccountSummary(userId, query.broker_account_id, query.refresh);
+      return await this.tradingAccountService.getAccountSummary(userId, query.refresh);
     } catch (error: unknown) {
       throw toHttpException(error);
     }
@@ -62,7 +68,7 @@ export class TradingAccountController {
   async positions(@Req() req: Request, @Query() query: TradingAccountQueryDto): Promise<Record<string, unknown>> {
     const userId = this.requireUserId(req);
     try {
-      return await this.tradingAccountService.getPositions(userId, query.broker_account_id, query.refresh);
+      return await this.tradingAccountService.getPositions(userId, query.refresh);
     } catch (error: unknown) {
       throw toHttpException(error);
     }
@@ -72,7 +78,7 @@ export class TradingAccountController {
   async orders(@Req() req: Request, @Query() query: TradingAccountQueryDto): Promise<Record<string, unknown>> {
     const userId = this.requireUserId(req);
     try {
-      return await this.tradingAccountService.getOrders(userId, query.broker_account_id, query.refresh);
+      return await this.tradingAccountService.getOrders(userId, query.refresh);
     } catch (error: unknown) {
       throw toHttpException(error);
     }
@@ -82,7 +88,7 @@ export class TradingAccountController {
   async trades(@Req() req: Request, @Query() query: TradingAccountQueryDto): Promise<Record<string, unknown>> {
     const userId = this.requireUserId(req);
     try {
-      return await this.tradingAccountService.getTrades(userId, query.broker_account_id, query.refresh);
+      return await this.tradingAccountService.getTrades(userId, query.refresh);
     } catch (error: unknown) {
       throw toHttpException(error);
     }
@@ -92,23 +98,41 @@ export class TradingAccountController {
   async performance(@Req() req: Request, @Query() query: TradingAccountQueryDto): Promise<Record<string, unknown>> {
     const userId = this.requireUserId(req);
     try {
-      return await this.tradingAccountService.getPerformance(userId, query.broker_account_id, query.refresh);
+      return await this.tradingAccountService.getPerformance(userId, query.refresh);
+    } catch (error: unknown) {
+      throw toHttpException(error);
+    }
+  }
+
+  @Post('/funds/add')
+  async addFunds(@Req() req: Request, @Body() body: AddFundsDto): Promise<Record<string, unknown>> {
+    const userId = this.requireUserId(req);
+    try {
+      return await this.tradingAccountService.addFunds(userId, {
+        amount: body.amount,
+        note: body.note,
+      });
     } catch (error: unknown) {
       throw toHttpException(error);
     }
   }
 
   @Post('/orders')
-  async placeOrder(@Req() req: Request, @Body() body: PlaceOrderDto): Promise<Record<string, unknown>> {
+  async placeOrder(
+    @Req() req: Request,
+    @Body() body: PlaceOrderDto,
+    @Headers('idempotency-key') idempotencyKeyHeader?: string,
+  ): Promise<Record<string, unknown>> {
     const userId = this.requireUserId(req);
     try {
-      return await this.tradingAccountService.placeOrder(userId, body.broker_account_id, {
+      return await this.tradingAccountService.placeOrder(userId, {
         stock_code: body.stock_code,
         stock_name: body.stock_name,
         direction: body.direction,
         type: body.type,
         price: body.price,
         quantity: body.quantity,
+        idempotency_key: body.idempotency_key || idempotencyKeyHeader,
       });
     } catch (error: unknown) {
       throw toHttpException(error);
@@ -116,10 +140,14 @@ export class TradingAccountController {
   }
 
   @Post('/orders/cancel')
-  async cancelOrder(@Req() req: Request, @Body() body: CancelOrderDto): Promise<Record<string, unknown>> {
+  async cancelOrder(
+    @Req() req: Request,
+    @Body() body: CancelOrderDto,
+    @Headers('idempotency-key') idempotencyKeyHeader?: string,
+  ): Promise<Record<string, unknown>> {
     const userId = this.requireUserId(req);
     try {
-      return await this.tradingAccountService.cancelOrder(userId, body.broker_account_id, body.order_id);
+      return await this.tradingAccountService.cancelOrder(userId, body.order_id, body.idempotency_key || idempotencyKeyHeader);
     } catch (error: unknown) {
       throw toHttpException(error);
     }

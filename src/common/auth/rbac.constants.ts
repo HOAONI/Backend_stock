@@ -39,7 +39,7 @@ export function resolveModuleCode(pathname: string): RbacModuleCode | null {
   if (path.startsWith('/api/v1/backtest')) return 'backtest';
   if (path.startsWith('/api/v1/system')) return 'system_config';
   if (path.startsWith('/api/v1/users/me/settings')) return 'user_settings';
-  if (path.startsWith('/api/v1/users/me/broker-accounts')) return 'broker_account';
+  if (path.startsWith('/api/v1/users/me/simulation-account')) return 'broker_account';
   if (path.startsWith('/api/v1/users/me/trading')) return 'trading_account';
   if (path.startsWith('/api/v1/admin/users')) return 'admin_user';
   if (path.startsWith('/api/v1/admin/roles')) return 'admin_role';

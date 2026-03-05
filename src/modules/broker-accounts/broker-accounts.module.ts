@@ -1,10 +1,10 @@
 import { Module } from '@nestjs/common';
 
-import { BrokerAccountsController } from './broker-accounts.controller';
 import { BrokerAccountsService } from './broker-accounts.service';
+import { SimulationAccountController } from './simulation-account.controller';
 
 @Module({
-  controllers: [BrokerAccountsController],
+  controllers: [SimulationAccountController],
   providers: [BrokerAccountsService],
   exports: [BrokerAccountsService],
 })

@@ -62,8 +62,7 @@ export function maskRuntimeConfig(runtimeConfig: AgentRuntimeConfig): AgentRunti
     execution: runtimeConfig.execution
       ? {
           mode: runtimeConfig.execution.mode,
-          has_ticket: Boolean(runtimeConfig.execution.has_ticket || runtimeConfig.execution.credential_ticket),
-          ...(runtimeConfig.execution.ticket_id != null ? { ticket_id: runtimeConfig.execution.ticket_id } : {}),
+          has_ticket: Boolean(runtimeConfig.execution.has_ticket),
           ...(runtimeConfig.execution.broker_account_id != null
             ? { broker_account_id: runtimeConfig.execution.broker_account_id }
             : {}),

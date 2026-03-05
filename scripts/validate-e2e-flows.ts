@@ -598,12 +598,16 @@ async function main(): Promise<void> {
   const tradingOrders = await request('/api/v1/users/me/trading/orders');
   const tradingTrades = await request('/api/v1/users/me/trading/trades');
   const tradingPerformance = await request('/api/v1/users/me/trading/performance');
-  const agentBridgeUnauthorized = await request('/api/v1/internal/agent/credential-tickets', {
+  const agentBridgeEndpoint = await request('/api/v1/internal/agent/credential-tickets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ user_id: 1, scope: 'read' }),
   });
-  push('broker-accounts-list', brokerAccountsList.status === 200 ? 'pass' : 'warn', `status=${brokerAccountsList.status}`);
+  push(
+    'broker-accounts-list-removed',
+    brokerAccountsList.status === 404 ? 'pass' : 'warn',
+    `status=${brokerAccountsList.status}`,
+  );
   push(
     'trading-account-summary',
     [200, 404].includes(tradingSummary.status) ? 'pass' : 'warn',
@@ -630,9 +634,9 @@ async function main(): Promise<void> {
     `status=${tradingPerformance.status}`,
   );
   push(
-    'agent-bridge-unauthorized',
-    agentBridgeUnauthorized.status === 401 ? 'pass' : 'warn',
-    `status=${agentBridgeUnauthorized.status}`,
+    'agent-bridge-endpoint-removed',
+    agentBridgeEndpoint.status === 404 ? 'pass' : 'warn',
+    `status=${agentBridgeEndpoint.status}`,
   );
 
   const configData = asRecord(configResp.json);
@@ -662,9 +666,18 @@ async function main(): Promise<void> {
   const backtestCompare = await request('/api/v1/backtest/compare', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ eval_window_days_list: [5, 10, 20] }),
+    body: JSON.stringify({
+      eval_window_days_list: [5, 10, 20],
+      strategy_codes: ['agent_v1', 'ma20_trend', 'rsi14_mean_reversion'],
+    }),
   });
   const backtestCurvesStockMissingCode = await request('/api/v1/backtest/curves?scope=stock&eval_window_days=10');
+  const backtestComparePayload = asRecord(backtestCompare.json);
+  const backtestCompareItems = asArray<Record<string, unknown>>(backtestComparePayload.items);
+  const compareRowsExpected = 3 * 3;
+  const compareHasStrategyFields = backtestCompareItems.every(
+    (item) => typeof item.strategy_code === 'string' && typeof item.strategy_name === 'string',
+  );
   push('backtest-curves', backtestCurves.status === 200 ? 'pass' : 'warn', `status=${backtestCurves.status}`);
   push(
     'backtest-distribution',
@@ -672,6 +685,11 @@ async function main(): Promise<void> {
     `status=${backtestDistribution.status}`,
   );
   push('backtest-compare', backtestCompare.status === 200 ? 'pass' : 'warn', `status=${backtestCompare.status}`);
+  push(
+    'backtest-compare-structure',
+    backtestCompare.status === 200 && compareHasStrategyFields && backtestCompareItems.length === compareRowsExpected ? 'pass' : 'warn',
+    `status=${backtestCompare.status}, rows=${backtestCompareItems.length}, expected=${compareRowsExpected}, strategyFields=${compareHasStrategyFields}`,
+  );
   push(
     'backtest-curves-stock-missing-code',
     backtestCurvesStockMissingCode.status === 400 ? 'pass' : 'warn',

@@ -6,13 +6,67 @@ import { AgentRunBridgeService } from '@/common/agent/agent-run-bridge.service';
 import type { AgentRuntimeConfig } from '@/common/agent/agent.types';
 import { PrismaService } from '@/common/database/prisma.service';
 import { mapAgentRunToAnalysis } from '@/modules/analysis/analysis.mapper';
-import { AnalysisService } from '@/modules/analysis/analysis.service';
+import { AnalysisBrokerMeta, AnalysisService } from '@/modules/analysis/analysis.service';
+import { TradingAccountService, TradingRuntimeContextPayload } from '@/modules/trading-account/trading-account.service';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function asPositiveNumber(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) {
+    return null;
+  }
+  return n;
+}
+
+function asNumber(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return null;
+  }
+  return n;
+}
+
+function asNonNegativeNumber(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) {
+    return null;
+  }
+  return n;
+}
+
+function asRecordArray(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => item as Record<string, unknown>);
+}
+
+function normalizeStockCode(code: string): string {
+  return String(code ?? '').trim().toUpperCase().replace(/\.(SH|SZ)$/, '');
+}
+
+function parseTradingSessions(raw: string): Array<{ start: number; end: number }> {
+  return String(raw ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.includes('-'))
+    .map((item) => {
+      const [startRaw, endRaw] = item.split('-', 2);
+      const [sh, sm] = String(startRaw ?? '').split(':', 2);
+      const [eh, em] = String(endRaw ?? '').split(':', 2);
+      const start = Number(sh) * 60 + Number(sm);
+      const end = Number(eh) * 60 + Number(em);
+      return { start, end };
+    })
+    .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.start >= 0 && item.end > item.start);
 }
 
 @Injectable()
@@ -24,6 +78,7 @@ export class TaskWorkerService {
     private readonly prisma: PrismaService,
     private readonly agentRunBridge: AgentRunBridgeService,
     private readonly analysisService: AnalysisService,
+    private readonly tradingAccountService: TradingAccountService,
   ) {}
 
   async start(): Promise<void> {
@@ -75,8 +130,35 @@ export class TaskWorkerService {
     return null;
   }
 
+  private buildRuntimeContext(payload: TradingRuntimeContextPayload): NonNullable<AgentRuntimeConfig['context']> {
+    const summary = asRecord(payload.summary) ?? {};
+    const positions = asRecordArray(payload.positions);
+
+    const cash = asNumber(summary.cash ?? summary.available_cash ?? summary.availableCash) ?? 0;
+    const marketValue = asNumber(summary.market_value ?? summary.total_market_value ?? summary.marketValue) ?? 0;
+    const totalAsset = asNumber(summary.total_asset ?? summary.totalAsset ?? summary.total_equity) ?? (cash + marketValue);
+
+    return {
+      summary,
+      positions,
+      account_snapshot: {
+        broker_account_id: payload.broker_account_id,
+        broker_code: payload.broker_code,
+        provider_code: payload.provider_code,
+        provider_name: payload.provider_name,
+        account_uid: payload.account_uid,
+        account_display_name: payload.account_display_name,
+        snapshot_at: payload.snapshot_at,
+        data_source: payload.data_source,
+        cash,
+        total_market_value: marketValue,
+        total_asset: totalAsset,
+        positions,
+      },
+    };
+  }
+
   private async resolveRunOptions(task: {
-    id: number;
     taskId: string;
     requestPayload: unknown;
     ownerUserId: number | null;
@@ -84,46 +166,27 @@ export class TaskWorkerService {
     accountName: string | null;
     runtimeConfig?: AgentRuntimeConfig;
     forceRuntimeConfig: boolean;
-    executionMode: 'paper' | 'broker';
+    executionMeta: AnalysisBrokerMeta;
   }> {
     const executionMeta = this.analysisService.resolveExecutionMetaFromPayload(task.requestPayload);
-    const shouldUseBroker = executionMeta.execution_mode === 'broker';
 
     if (task.ownerUserId != null) {
       const runtime = await this.analysisService.buildRuntimeContext(task.ownerUserId, {
         includeApiToken: this.shouldForwardRuntimeConfig(),
       });
-      let runtimeConfig = this.analysisService.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta);
-      if (shouldUseBroker) {
-        if (!executionMeta.broker_account_id) {
-          const error = new Error('broker 模式任务缺少 broker_account_id') as Error & { code: string };
-          error.code = 'VALIDATION_ERROR';
-          throw error;
-        }
-        const issued = await this.analysisService.issueTradeCredentialTicket({
-          userId: task.ownerUserId,
-          brokerAccountId: executionMeta.broker_account_id,
-          taskId: task.taskId,
-        });
-        runtimeConfig = this.analysisService.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta, {
-          credentialTicket: issued.ticket,
-          ticketId: issued.ticketId,
-        });
-        await this.analysisService.updateTaskCredentialTicketMeta(task.id, issued.ticketId);
-      }
+      const runtimeConfig = this.analysisService.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta);
+      const tradingRuntime = await this.tradingAccountService.getRuntimeContext(task.ownerUserId, true);
+      const runtimeWithContext: AgentRuntimeConfig = {
+        ...runtimeConfig,
+        context: this.buildRuntimeContext(tradingRuntime),
+      };
 
       return {
         accountName: runtime.accountName,
-        runtimeConfig,
-        forceRuntimeConfig: shouldUseBroker,
-        executionMode: executionMeta.execution_mode,
+        runtimeConfig: runtimeWithContext,
+        forceRuntimeConfig: true,
+        executionMeta,
       };
-    }
-
-    if (shouldUseBroker) {
-      const error = new Error('broker 模式任务缺少 owner_user_id，无法签发凭据票据') as Error & { code: string };
-      error.code = 'VALIDATION_ERROR';
-      throw error;
     }
 
     const runtimeConfig = this.resolveRuntimeConfigFromPayload(task);
@@ -132,8 +195,273 @@ export class TaskWorkerService {
       runtimeConfig: runtimeConfig
         ? this.analysisService.buildRuntimeConfigForExecution(runtimeConfig, executionMeta)
         : undefined,
-      forceRuntimeConfig: false,
-      executionMode: executionMeta.execution_mode,
+      forceRuntimeConfig: Boolean(runtimeConfig),
+      executionMeta,
+    };
+  }
+
+  private shouldAutoPlaceOrder(meta: AnalysisBrokerMeta): boolean {
+    return meta.requested_execution_mode === 'auto' && Boolean(meta.auto_order_enabled);
+  }
+
+  private isAShare(code: string): boolean {
+    return /^(60|68|00|30)\d{4}$/.test(code);
+  }
+
+  private isWithinTradingSession(now: Date = new Date()): boolean {
+    const enforce = (process.env.ANALYSIS_AUTO_ORDER_ENFORCE_SESSION ?? 'true').toLowerCase() === 'true';
+    if (!enforce) {
+      return true;
+    }
+
+    const timezone = String(process.env.ANALYSIS_AUTO_ORDER_TIMEZONE ?? 'Asia/Shanghai').trim() || 'Asia/Shanghai';
+    const sessions = parseTradingSessions(process.env.ANALYSIS_AUTO_ORDER_TRADING_SESSIONS ?? '09:30-11:30,13:00-15:00');
+    if (sessions.length === 0) {
+      return true;
+    }
+
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(now);
+    const weekday = String(parts.find((p) => p.type === 'weekday')?.value ?? '').toLowerCase();
+    if (weekday === 'sat' || weekday === 'sun') {
+      return false;
+    }
+
+    const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? NaN);
+    const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? NaN);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+      return false;
+    }
+    const minutes = hour * 60 + minute;
+    return sessions.some((window) => window.start <= minutes && minutes < window.end);
+  }
+
+  private resolveAutoOrderCandidate(run: Record<string, unknown>, stockCode: string): {
+    direction: 'buy' | 'sell';
+    quantity: number;
+    price: number;
+  } | null {
+    const executionRoot = asRecord(run.execution_snapshot) ?? {};
+    const execution = asRecord(executionRoot[stockCode]) ?? executionRoot;
+    const action = String(execution.action ?? '').trim().toLowerCase();
+    if (action !== 'buy' && action !== 'sell') {
+      return null;
+    }
+
+    const qty = asPositiveNumber(
+      execution.traded_qty
+      ?? execution.target_qty
+      ?? execution.quantity
+      ?? execution.order_quantity,
+    );
+    if (!qty) {
+      return null;
+    }
+
+    const dataRoot = asRecord(run.data_snapshot) ?? {};
+    const data = asRecord(dataRoot[stockCode]) ?? dataRoot;
+    const quote = asRecord(data.realtime_quote) ?? {};
+    const price = asPositiveNumber(
+      execution.fill_price
+      ?? quote.price
+      ?? quote.current_price
+      ?? execution.price,
+    );
+    if (!price) {
+      return null;
+    }
+
+    return {
+      direction: action as 'buy' | 'sell',
+      quantity: Math.floor(qty),
+      price,
+    };
+  }
+
+  private applyAutoOrderLimits(candidate: { quantity: number; price: number }): { quantity: number; skippedReason?: string } {
+    const maxQty = Math.max(1, Number(process.env.ANALYSIS_AUTO_ORDER_MAX_QTY ?? '20000'));
+    const maxNotional = Math.max(1000, Number(process.env.ANALYSIS_AUTO_ORDER_MAX_NOTIONAL ?? '200000'));
+    const safeQtyByNotional = Math.floor(maxNotional / candidate.price);
+    const safeQty = Math.min(candidate.quantity, maxQty, safeQtyByNotional > 0 ? safeQtyByNotional : 0);
+    if (safeQty <= 0) {
+      return { quantity: 0, skippedReason: 'auto_order_limit_rejected' };
+    }
+    return { quantity: safeQty };
+  }
+
+  private resolvePrecheckCash(summary: Record<string, unknown>): number {
+    return Math.max(
+      0,
+      asNonNegativeNumber(summary.cash ?? summary.available_cash ?? summary.availableCash) ?? 0,
+    );
+  }
+
+  private resolvePrecheckAvailableQty(positions: Array<Record<string, unknown>>, stockCode: string): number {
+    const targetCode = normalizeStockCode(stockCode);
+    for (const row of positions) {
+      const rowCode = normalizeStockCode(String(row.code ?? row.stock_code ?? row.symbol ?? ''));
+      if (rowCode !== targetCode) {
+        continue;
+      }
+      return Math.max(
+        0,
+        Math.floor(asNonNegativeNumber(row.available_qty ?? row.available ?? row.quantity ?? row.qty ?? 0) ?? 0),
+      );
+    }
+    return 0;
+  }
+
+  private estimateBuyRequiredCash(price: number, quantity: number): number {
+    const commissionRate = Math.max(0, asNonNegativeNumber(process.env.BACKTRADER_DEFAULT_COMMISSION ?? '0.0003') ?? 0.0003);
+    const slippageBps = Math.max(0, asNonNegativeNumber(process.env.BACKTRADER_DEFAULT_SLIPPAGE_BPS ?? '2') ?? 2);
+    const effectivePrice = price * (1 + slippageBps / 10000);
+    return effectivePrice * quantity * (1 + commissionRate);
+  }
+
+  private async runAutoOrderPrecheck(input: {
+    userId: number;
+    stockCode: string;
+    direction: 'buy' | 'sell';
+    quantity: number;
+    price: number;
+  }): Promise<{ ok: true } | { ok: false; reason: string; details: Record<string, unknown> }> {
+    const runtime = await this.tradingAccountService.getRuntimeContext(input.userId, true);
+    const summary = asRecord(runtime.summary) ?? {};
+    const positions = asRecordArray(runtime.positions);
+
+    if (input.direction === 'buy') {
+      const cash = this.resolvePrecheckCash(summary);
+      const requiredCash = this.estimateBuyRequiredCash(input.price, input.quantity);
+      if (cash + 1e-6 < requiredCash) {
+        return {
+          ok: false,
+          reason: 'insufficient_cash_precheck',
+          details: {
+            cash: Number(cash.toFixed(4)),
+            required_cash: Number(requiredCash.toFixed(4)),
+            quantity: input.quantity,
+            price: input.price,
+          },
+        };
+      }
+      return { ok: true };
+    }
+
+    const availableQty = this.resolvePrecheckAvailableQty(positions, input.stockCode);
+    if (availableQty < input.quantity) {
+      return {
+        ok: false,
+        reason: 'insufficient_position_precheck',
+        details: {
+          available_qty: availableQty,
+          requested_qty: input.quantity,
+        },
+      };
+    }
+    return { ok: true };
+  }
+
+  private resolveAutoOrderStatus(orderPayload: Record<string, unknown>): 'submitted' | 'failed' {
+    const providerStatus = String(
+      orderPayload.provider_status
+      ?? orderPayload.providerStatus
+      ?? orderPayload.status
+      ?? '',
+    )
+      .trim()
+      .toLowerCase();
+    return providerStatus === 'rejected' || providerStatus === 'failed' ? 'failed' : 'submitted';
+  }
+
+  private async maybeAutoPlaceOrder(input: {
+    task: { taskId: string; stockCode: string; ownerUserId: number | null };
+    runPayload: Record<string, unknown>;
+    executionMeta: AnalysisBrokerMeta;
+  }): Promise<Record<string, unknown> | null> {
+    if (!this.shouldAutoPlaceOrder(input.executionMeta)) {
+      return null;
+    }
+    if (!input.task.ownerUserId) {
+      throw new Error('auto 模式任务缺少 owner_user_id，无法自动下单');
+    }
+
+    const stockCode = normalizeStockCode(input.task.stockCode);
+    if ((process.env.ANALYSIS_AUTO_ORDER_A_SHARE_ONLY ?? 'true').toLowerCase() === 'true' && !this.isAShare(stockCode)) {
+      return {
+        status: 'skipped',
+        reason: 'non_a_share',
+      };
+    }
+    if (!this.isWithinTradingSession()) {
+      return {
+        status: 'skipped',
+        reason: 'outside_trading_session',
+      };
+    }
+
+    const candidate = this.resolveAutoOrderCandidate(input.runPayload, input.task.stockCode);
+    if (!candidate) {
+      return {
+        status: 'skipped',
+        reason: 'no_executable_signal',
+      };
+    }
+    const limit = this.applyAutoOrderLimits({
+      quantity: candidate.quantity,
+      price: candidate.price,
+    });
+    if (limit.quantity <= 0) {
+      return {
+        status: 'skipped',
+        reason: limit.skippedReason ?? 'auto_order_limit_rejected',
+      };
+    }
+
+    const precheck = await this.runAutoOrderPrecheck({
+      userId: input.task.ownerUserId,
+      stockCode,
+      direction: candidate.direction,
+      quantity: limit.quantity,
+      price: candidate.price,
+    });
+    if (!precheck.ok) {
+      return {
+        status: 'skipped',
+        reason: precheck.reason,
+        precheck: precheck.details,
+      };
+    }
+
+    const orderType = (process.env.ANALYSIS_AUTO_ORDER_TYPE ?? 'market').toLowerCase() === 'limit' ? 'limit' : 'market';
+    const idempotencyKey = `analysis-auto:${input.task.taskId}:${stockCode}`;
+
+    const response = await this.tradingAccountService.placeOrder(input.task.ownerUserId, {
+      stock_code: stockCode,
+      direction: candidate.direction,
+      type: orderType,
+      price: candidate.price,
+      quantity: limit.quantity,
+      idempotency_key: idempotencyKey,
+      source_task_id: input.task.taskId,
+      payload: {
+        source: 'analysis_auto_order',
+      },
+    });
+    const orderPayload = asRecord(response.order) ?? {};
+    const status = this.resolveAutoOrderStatus(orderPayload);
+
+    return {
+      status,
+      ...(status === 'failed' ? { reason: 'provider_rejected' } : {}),
+      idempotency_key: idempotencyKey,
+      order_type: orderType,
+      order: response.order,
     };
   }
 
@@ -181,23 +509,20 @@ export class TaskWorkerService {
         runtimeConfig: options.runtimeConfig,
         forceRuntimeConfig: options.forceRuntimeConfig,
       });
-      if (options.executionMode === 'broker') {
-        try {
-          this.analysisService.assertBrokerExecutionSucceeded(bridgeResult.run, task.stockCode);
-        } catch (error: unknown) {
-          const degraded = new Error((error as Error).message) as Error & {
-            code: string;
-            bridgeMeta: Record<string, unknown>;
-          };
-          degraded.code = String((error as Error & { code?: string }).code ?? 'broker_execution_degraded');
-          degraded.bridgeMeta = bridgeResult.bridgeMeta as unknown as Record<string, unknown>;
-          throw degraded;
-        }
-      }
       const mapped = mapAgentRunToAnalysis(bridgeResult.run, task.stockCode, task.reportType);
+      const autoOrder = await this.maybeAutoPlaceOrder({
+        task: {
+          taskId: task.taskId,
+          stockCode: task.stockCode,
+          ownerUserId: task.ownerUserId,
+        },
+        runPayload: bridgeResult.run as unknown as Record<string, unknown>,
+        executionMeta: options.executionMeta,
+      });
       const resultPayload = {
         ...mapped.report,
         bridge_meta: bridgeResult.bridgeMeta,
+        auto_order: autoOrder,
       };
 
       await this.prisma.analysisHistory.create({

@@ -9,5 +9,6 @@ import { TradingAccountService } from './trading-account.service';
   imports: [BrokerAccountsModule],
   controllers: [TradingAccountController],
   providers: [TradingAccountService],
+  exports: [TradingAccountService],
 })
 export class TradingAccountModule {}

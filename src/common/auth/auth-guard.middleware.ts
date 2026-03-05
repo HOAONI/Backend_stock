@@ -8,9 +8,6 @@ import { BUILTIN_ROLE_CODES, resolveModuleCode, resolveRbacAction } from './rbac
 
 function isExemptPath(pathname: string): boolean {
   const normalized = pathname.endsWith('/') && pathname.length > 1 ? pathname.slice(0, -1) : pathname;
-  if (normalized.startsWith('/api/v1/internal/agent')) {
-    return true;
-  }
   const exempt = new Set([
     '/api/health',
     '/health',

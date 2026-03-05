@@ -5,10 +5,12 @@ import * as path from 'node:path';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { PrismaClient } from '@prisma/client';
 import cookieParser from 'cookie-parser';
 import * as dotenv from 'dotenv';
 
 import { AppModule } from './app.module';
+import { STRATEGY_BACKTEST_SCHEMA_NOT_READY_MESSAGE, getBacktestStorageReadiness } from './common/backtest/backtest-storage-readiness';
 import { GlobalHttpExceptionFilter } from './common/errors/http-exception.filter';
 import { TaskWorkerService } from './common/worker/task-worker.service';
 
@@ -16,7 +18,7 @@ function setupEnv(): void {
   const envFile = process.env.ENV_FILE;
   const resolved = envFile ? path.resolve(envFile) : path.resolve(process.cwd(), '.env');
   if (fs.existsSync(resolved)) {
-    dotenv.config({ path: resolved });
+    dotenv.config({ path: resolved, override: true });
   }
 }
 
@@ -39,8 +41,26 @@ function runWorkerInApiProcess(): boolean {
   return (process.env.RUN_WORKER_IN_API ?? 'false').toLowerCase() === 'true';
 }
 
+async function assertBacktestStorageReady(): Promise<void> {
+  const prisma = new PrismaClient();
+  try {
+    const readiness = await getBacktestStorageReadiness(prisma);
+    if (readiness.ready) {
+      return;
+    }
+
+    const missing = readiness.missingTables.join(', ');
+    throw new Error(
+      `${STRATEGY_BACKTEST_SCHEMA_NOT_READY_MESSAGE}; schema=${readiness.schema}; missing_tables=${missing}; run pnpm db:push or pnpm prisma:deploy`,
+    );
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 async function bootstrap(): Promise<void> {
   setupEnv();
+  await assertBacktestStorageReady();
 
   const app = await NestFactory.create(AppModule, {
     cors: false,

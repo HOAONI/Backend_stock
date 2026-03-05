@@ -1,5 +1,4 @@
-import { Type } from 'class-transformer';
-import { IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class AnalyzeRequestDto {
   @IsOptional()
@@ -26,12 +25,6 @@ export class AnalyzeRequestDto {
   async_mode = false;
 
   @IsOptional()
-  @IsIn(['auto', 'paper', 'broker'])
-  execution_mode: 'auto' | 'paper' | 'broker' = 'auto';
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  broker_account_id?: number;
+  @IsIn(['auto', 'paper'])
+  execution_mode: 'auto' | 'paper' = 'auto';
 }

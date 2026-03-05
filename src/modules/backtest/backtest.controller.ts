@@ -3,7 +3,10 @@ import { Type } from 'class-transformer';
 import { ArrayMaxSize, ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Request } from 'express';
 
+import { STRATEGY_BACKTEST_SCHEMA_NOT_READY_MESSAGE } from '@/common/backtest/backtest-storage-readiness';
 import { BacktestService } from './backtest.service';
+import { BACKTEST_COMPARE_STRATEGY_CODES } from './backtest-compare-strategies';
+import { BACKTEST_STRATEGY_CODES } from './backtest-strategy-strategies';
 
 class BacktestRunRequestDto {
   @IsOptional()
@@ -48,9 +51,13 @@ class BacktestScopeQueryDto {
   @Min(1)
   @Max(120)
   eval_window_days?: number;
+
+  @IsOptional()
+  @IsIn(['portfolio', 'sequential'])
+  equity_mode?: 'portfolio' | 'sequential';
 }
 
-class BacktestCompareRequestDto {
+export class BacktestCompareRequestDto {
   @IsOptional()
   @IsString()
   code?: string;
@@ -63,11 +70,126 @@ class BacktestCompareRequestDto {
   @Min(1, { each: true })
   @Max(120, { each: true })
   eval_window_days_list!: number[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(3)
+  @IsIn([...BACKTEST_COMPARE_STRATEGY_CODES], { each: true })
+  strategy_codes?: string[];
+}
+
+export class BacktestStrategyRunRequestDto {
+  @IsString()
+  code!: string;
+
+  @IsString()
+  start_date!: string;
+
+  @IsString()
+  end_date!: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(2)
+  @IsIn([...BACKTEST_STRATEGY_CODES], { each: true })
+  strategy_codes?: string[];
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  initial_capital?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @Min(0)
+  @Max(1)
+  commission_rate?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @Min(0)
+  @Max(1000)
+  slippage_bps?: number;
+}
+
+export class BacktestStrategyRunsQueryDto {
+  @IsOptional()
+  @IsString()
+  code?: string;
+
+  @IsOptional()
+  @IsString()
+  strategy_code?: string;
+
+  @IsOptional()
+  @IsString()
+  start_date?: string;
+
+  @IsOptional()
+  @IsString()
+  end_date?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit = 20;
 }
 
 @Controller('/api/v1/backtest')
 export class BacktestController {
   constructor(private readonly backtestService: BacktestService) {}
+
+  private isStrategyBacktestSchemaNotReady(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+    const row = error as {
+      code?: unknown;
+      message?: unknown;
+      meta?: { table?: unknown };
+    };
+
+    if (String(row.code ?? '') !== 'P2021') {
+      return false;
+    }
+
+    const tableName = String(row.meta?.table ?? '').toLowerCase();
+    const message = String(row.message ?? '').toLowerCase();
+    return tableName.includes('strategy_backtest_') || message.includes('strategy_backtest_');
+  }
+
+  private throwStrategyBacktestHttpError(error: unknown): never {
+    if (error instanceof HttpException) {
+      throw error;
+    }
+    if (this.isStrategyBacktestSchemaNotReady(error)) {
+      throw new HttpException(
+        {
+          error: 'schema_not_ready',
+          message: STRATEGY_BACKTEST_SCHEMA_NOT_READY_MESSAGE,
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    throw new HttpException(
+      {
+        error: 'internal_error',
+        message: `策略回测失败: ${(error as Error).message}`,
+      },
+      HttpStatus.INTERNAL_SERVER_ERROR,
+    );
+  }
 
   private resolveScope(req: Request): { userId: number; includeAll: boolean } {
     const user = req.authUser;
@@ -84,7 +206,7 @@ export class BacktestController {
   async run(@Body() body: BacktestRunRequestDto, @Req() req: Request): Promise<Record<string, unknown>> {
     const scope = this.resolveScope(req);
     try {
-      return await this.backtestService.run({
+      const data = await this.backtestService.run({
         code: body.code,
         force: body.force,
         evalWindowDays: body.eval_window_days,
@@ -92,6 +214,7 @@ export class BacktestController {
         limit: body.limit,
         scope,
       });
+      return { ...data, legacy_event_backtest: true };
     } catch (error: unknown) {
       throw new HttpException(
         {
@@ -115,13 +238,14 @@ export class BacktestController {
     const parsedPage = Number(page);
     const parsedLimit = Number(limit);
 
-    return await this.backtestService.listResults({
+    const data = await this.backtestService.listResults({
       code,
       evalWindowDays: evalWindowDays != null ? Number(evalWindowDays) : undefined,
       page: Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1,
       limit: Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 200) : 20,
       scope,
     });
+    return { ...data, legacy_event_backtest: true };
   }
 
   @Get('/performance')
@@ -143,7 +267,11 @@ export class BacktestController {
       );
     }
 
-    return summary;
+    return {
+      ...summary,
+      warnings: evalWindowDays == null ? ['eval_window_days not provided, default window applied'] : [],
+      legacy_event_backtest: true,
+    };
   }
 
   @Get('/performance/:code')
@@ -164,7 +292,11 @@ export class BacktestController {
       );
     }
 
-    return summary;
+    return {
+      ...summary,
+      warnings: evalWindowDays == null ? ['eval_window_days not provided, default window applied'] : [],
+      legacy_event_backtest: true,
+    };
   }
 
   @Get('/curves')
@@ -180,12 +312,14 @@ export class BacktestController {
       );
     }
 
-    return await this.backtestService.getCurves({
+    const data = await this.backtestService.getCurves({
       scope: query.scope,
       code: query.code,
       evalWindowDays: query.eval_window_days,
+      equityMode: query.equity_mode,
       requester: scope,
     });
+    return { ...data, legacy_event_backtest: true };
   }
 
   @Get('/distribution')
@@ -201,21 +335,95 @@ export class BacktestController {
       );
     }
 
-    return await this.backtestService.getDistribution({
+    const data = await this.backtestService.getDistribution({
       scope: query.scope,
       code: query.code,
       evalWindowDays: query.eval_window_days,
       requester: scope,
     });
+    return { ...data, legacy_event_backtest: true };
   }
 
   @Post('/compare')
   async compare(@Req() req: Request, @Body() body: BacktestCompareRequestDto): Promise<Record<string, unknown>> {
     const scope = this.resolveScope(req);
-    return await this.backtestService.compareWindows({
+    const data = await this.backtestService.compareWindows({
       code: body.code,
       evalWindowDaysList: body.eval_window_days_list,
+      strategyCodes: body.strategy_codes,
       requester: scope,
     });
+    return { ...data, legacy_event_backtest: true };
+  }
+
+  @Post('/strategy/run')
+  async runStrategy(@Req() req: Request, @Body() body: BacktestStrategyRunRequestDto): Promise<Record<string, unknown>> {
+    const scope = this.resolveScope(req);
+    try {
+      return await this.backtestService.runStrategyRange({
+        code: body.code,
+        startDate: body.start_date,
+        endDate: body.end_date,
+        strategyCodes: body.strategy_codes,
+        initialCapital: body.initial_capital,
+        commissionRate: body.commission_rate,
+        slippageBps: body.slippage_bps,
+        requester: scope,
+      });
+    } catch (error: unknown) {
+      this.throwStrategyBacktestHttpError(error);
+    }
+  }
+
+  @Get('/strategy/runs')
+  async listStrategyRuns(@Req() req: Request, @Query() query: BacktestStrategyRunsQueryDto): Promise<Record<string, unknown>> {
+    const scope = this.resolveScope(req);
+    try {
+      return await this.backtestService.listStrategyRuns({
+        code: query.code,
+        strategyCode: query.strategy_code,
+        startDate: query.start_date,
+        endDate: query.end_date,
+        page: query.page,
+        limit: query.limit,
+        requester: scope,
+      });
+    } catch (error: unknown) {
+      this.throwStrategyBacktestHttpError(error);
+    }
+  }
+
+  @Get('/strategy/runs/:run_group_id')
+  async getStrategyRunDetail(@Req() req: Request, @Param('run_group_id') runGroupId: string): Promise<Record<string, unknown>> {
+    const scope = this.resolveScope(req);
+    const parsedId = Number(runGroupId);
+    if (!Number.isFinite(parsedId) || parsedId <= 0) {
+      throw new HttpException(
+        {
+          error: 'validation_error',
+          message: 'run_group_id must be positive integer',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    let detail: Record<string, unknown> | null = null;
+    try {
+      detail = await this.backtestService.getStrategyRunDetail({
+        runGroupId: Math.trunc(parsedId),
+        requester: scope,
+      });
+    } catch (error: unknown) {
+      this.throwStrategyBacktestHttpError(error);
+    }
+    if (!detail) {
+      throw new HttpException(
+        {
+          error: 'not_found',
+          message: `未找到策略回测记录: ${parsedId}`,
+        },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    return detail;
   }
 }

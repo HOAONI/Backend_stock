@@ -1,17 +1,123 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
+import { BacktestAgentClientService } from '@/common/agent/backtest-agent-client.service';
 import { PrismaService } from '@/common/database/prisma.service';
-import { BacktestEngine, OVERALL_SENTINEL_CODE } from '@/common/backtest/backtest-engine';
 import { safeJsonParse, safeJsonStringify } from '@/common/utils/json';
-import { StocksService } from '@/modules/stocks/stocks.service';
+import {
+  BACKTEST_COMPARE_STRATEGY_CODES,
+  BACKTEST_COMPARE_STRATEGY_NAMES,
+  BacktestCompareStrategyCode,
+  DEFAULT_BACKTEST_COMPARE_STRATEGY_CODES,
+} from './backtest-compare-strategies';
+import {
+  BACKTEST_STRATEGY_CODES,
+  BACKTEST_STRATEGY_NAMES,
+  BacktestStrategyCode,
+  DEFAULT_BACKTEST_STRATEGY_CODES,
+} from './backtest-strategy-strategies';
+
+export const OVERALL_SENTINEL_CODE = '__overall__';
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+function asArrayOfRecords(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => item as Record<string, unknown>);
+}
+
+function toPrismaJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value ?? {})) as Prisma.InputJsonValue;
+}
 
 @Injectable()
 export class BacktestService {
+  private readonly logger = new Logger(BacktestService.name);
+
   constructor(
     private readonly prisma: PrismaService,
-    private readonly stocksService: StocksService,
+    private readonly backtestAgentClient: BacktestAgentClientService,
   ) {}
+
+  private toNumber(value: unknown): number | null {
+    if (value == null) {
+      return null;
+    }
+    if (typeof value === 'string' && value.trim().length === 0) {
+      return null;
+    }
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+      return null;
+    }
+    return num;
+  }
+
+  private toBoolean(value: unknown): boolean | null {
+    if (typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true') return true;
+      if (normalized === 'false') return false;
+    }
+    return null;
+  }
+
+  private toDate(value: unknown): Date | null {
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? null : value;
+    }
+    const text = String(value).trim();
+    if (!text) {
+      return null;
+    }
+
+    const parsed = new Date(text.length >= 10 ? `${text.slice(0, 10)}T00:00:00Z` : text);
+    if (Number.isNaN(parsed.getTime())) {
+      return null;
+    }
+    return parsed;
+  }
+
+  private toDateTime(value: unknown): Date | null {
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? null : value;
+    }
+    const text = String(value).trim();
+    if (!text) {
+      return null;
+    }
+
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) {
+      return null;
+    }
+    return parsed;
+  }
+
+  private buildOwnerFilter(scope: { userId: number; includeAll: boolean }): Prisma.BacktestResultWhereInput {
+    if (scope.includeAll) {
+      return {};
+    }
+    return { ownerUserId: scope.userId };
+  }
 
   private resolveAnalysisDate(contextSnapshot: string | null, createdAt: Date): Date {
     const payload = safeJsonParse<Record<string, any> | null>(contextSnapshot, null);
@@ -24,13 +130,6 @@ export class BacktestService {
     }
 
     return new Date(Date.UTC(createdAt.getUTCFullYear(), createdAt.getUTCMonth(), createdAt.getUTCDate()));
-  }
-
-  private buildOwnerFilter(scope: { userId: number; includeAll: boolean }): Prisma.BacktestResultWhereInput {
-    if (scope.includeAll) {
-      return {};
-    }
-    return { ownerUserId: scope.userId };
   }
 
   private mapSummary(summary: {
@@ -48,6 +147,8 @@ export class BacktestService {
     lossCount: number;
     neutralCount: number;
     directionAccuracyPct: number | null;
+    predictionWinRatePct: number | null;
+    tradeWinRatePct: number | null;
     winRatePct: number | null;
     neutralRatePct: number | null;
     avgStockReturnPct: number | null;
@@ -74,6 +175,8 @@ export class BacktestService {
       loss_count: summary.lossCount,
       neutral_count: summary.neutralCount,
       direction_accuracy_pct: summary.directionAccuracyPct,
+      prediction_win_rate_pct: summary.predictionWinRatePct,
+      trade_win_rate_pct: summary.tradeWinRatePct,
       win_rate_pct: summary.winRatePct,
       neutral_rate_pct: summary.neutralRatePct,
       avg_stock_return_pct: summary.avgStockReturnPct,
@@ -84,6 +187,7 @@ export class BacktestService {
       avg_days_to_first_hit: summary.avgDaysToFirstHit,
       advice_breakdown: summary.adviceBreakdown,
       diagnostics: summary.diagnostics,
+      metric_definition_version: 'v2',
     };
   }
 
@@ -93,10 +197,6 @@ export class BacktestService {
 
   private resolveScopeCode(scope: 'overall' | 'stock', code?: string): string {
     return scope === 'overall' ? OVERALL_SENTINEL_CODE : String(code ?? '').trim();
-  }
-
-  private round4(value: number): number {
-    return Math.round(value * 10000) / 10000;
   }
 
   private buildScopeWhere(input: {
@@ -118,286 +218,193 @@ export class BacktestService {
     return where;
   }
 
-  private buildCurves(
-    rows: Array<{
-      analysisDate: Date | null;
-      evaluatedAt: Date;
-      simulatedReturnPct: number | null;
-      stockReturnPct: number | null;
-      evalStatus: string;
-    }>,
-  ): Array<{
-    label: string;
-    strategy_return_pct: number;
-    benchmark_return_pct: number;
-    drawdown_pct: number;
-  }> {
-    const completed = [...rows]
-      .filter((item) => item.evalStatus === 'completed')
-      .sort((a, b) => {
-        const aTime = a.analysisDate?.getTime() ?? a.evaluatedAt.getTime();
-        const bTime = b.analysisDate?.getTime() ?? b.evaluatedAt.getTime();
-        return aTime - bTime;
-      });
-
-    let strategyEquity = 1;
-    let benchmarkEquity = 1;
-    let peak = 1;
-
-    return completed.map((row) => {
-      const strategy = Number(row.simulatedReturnPct ?? 0);
-      const benchmark = Number(row.stockReturnPct ?? 0);
-      strategyEquity *= 1 + strategy / 100;
-      benchmarkEquity *= 1 + benchmark / 100;
-
-      if (strategyEquity > peak) {
-        peak = strategyEquity;
-      }
-      const drawdown = ((strategyEquity / peak) - 1) * 100;
-
-      return {
-        label: row.analysisDate?.toISOString().slice(0, 10) ?? row.evaluatedAt.toISOString(),
-        strategy_return_pct: this.round4((strategyEquity - 1) * 100),
-        benchmark_return_pct: this.round4((benchmarkEquity - 1) * 100),
-        drawdown_pct: this.round4(drawdown),
-      };
-    });
+  private isCompareStrategyCode(value: string): value is BacktestCompareStrategyCode {
+    return (BACKTEST_COMPARE_STRATEGY_CODES as readonly string[]).includes(value);
   }
 
-  private maxDrawdown(curves: Array<{ drawdown_pct: number }>): number | null {
-    if (curves.length === 0) {
+  private normalizeCompareStrategyCodes(strategyCodes?: string[]): BacktestCompareStrategyCode[] {
+    const candidates = (strategyCodes ?? DEFAULT_BACKTEST_COMPARE_STRATEGY_CODES).map((item) => String(item).trim());
+    const normalized = Array.from(new Set(candidates.filter((item): item is BacktestCompareStrategyCode => this.isCompareStrategyCode(item))));
+    if (normalized.length > 0) {
+      return normalized;
+    }
+    return [...DEFAULT_BACKTEST_COMPARE_STRATEGY_CODES];
+  }
+
+  private isStrategyCode(value: string): value is BacktestStrategyCode {
+    return (BACKTEST_STRATEGY_CODES as readonly string[]).includes(value);
+  }
+
+  private normalizeStrategyCodes(strategyCodes?: string[]): BacktestStrategyCode[] {
+    const candidates = (strategyCodes ?? DEFAULT_BACKTEST_STRATEGY_CODES).map((item) => String(item).trim());
+    const normalized = Array.from(new Set(candidates.filter((item): item is BacktestStrategyCode => this.isStrategyCode(item))));
+    if (normalized.length > 0) {
+      return normalized;
+    }
+    return [...DEFAULT_BACKTEST_STRATEGY_CODES];
+  }
+
+  private parseDayText(value: unknown): Date | null {
+    if (value == null) {
       return null;
     }
-    return curves.reduce((min, item) => Math.min(min, item.drawdown_pct), curves[0].drawdown_pct);
+    const text = String(value).trim();
+    if (!text) {
+      return null;
+    }
+    const parsed = new Date(`${text.slice(0, 10)}T00:00:00Z`);
+    if (Number.isNaN(parsed.getTime())) {
+      return null;
+    }
+    return parsed;
   }
 
-  async run(input: {
-    code?: string;
-    force: boolean;
-    evalWindowDays?: number;
-    minAgeDays?: number;
-    limit: number;
-    scope: { userId: number; includeAll: boolean };
-  }): Promise<Record<string, number>> {
-    const evalWindowDays = Number(input.evalWindowDays ?? process.env.BACKTEST_EVAL_WINDOW_DAYS ?? 10);
-    const minAgeDays = Number(input.minAgeDays ?? process.env.BACKTEST_MIN_AGE_DAYS ?? 14);
-    const engineVersion = String(process.env.BACKTEST_ENGINE_VERSION ?? 'v1');
-    const neutralBandPct = Number(process.env.BACKTEST_NEUTRAL_BAND_PCT ?? 2.0);
-
-    const cutoff = new Date(Date.now() - minAgeDays * 24 * 3600 * 1000);
-
-    const candidates = await this.prisma.analysisHistory.findMany({
-      where: {
-        ...(input.scope.includeAll ? {} : { ownerUserId: input.scope.userId }),
-        ...(input.code ? { code: input.code } : {}),
-        createdAt: { lte: cutoff },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: input.limit,
-    });
-
-    let processed = 0;
-    let saved = 0;
-    let completed = 0;
-    let insufficient = 0;
-    let errors = 0;
-
-    const touchedCodesByOwner = new Map<number | null, Set<string>>();
-
-    for (const candidate of candidates) {
-      processed += 1;
-      if (!touchedCodesByOwner.has(candidate.ownerUserId)) {
-        touchedCodesByOwner.set(candidate.ownerUserId, new Set<string>());
-      }
-      touchedCodesByOwner.get(candidate.ownerUserId)!.add(candidate.code);
-
-      try {
-        if (!input.force) {
-          const existing = await this.prisma.backtestResult.findUnique({
-            where: {
-              analysisHistoryId_evalWindowDays_engineVersion: {
-                analysisHistoryId: candidate.id,
-                evalWindowDays,
-                engineVersion,
-              },
-            },
-          });
-
-          if (existing) {
-            continue;
-          }
-        }
-
-        const analysisDate = this.resolveAnalysisDate(candidate.contextSnapshot, candidate.createdAt);
-
-        const marketBars = await this.stocksService.getStartAndForwardBars(candidate.code, analysisDate, evalWindowDays);
-
-        const startPrice = marketBars.startPrice;
-        const startDate = marketBars.startDate;
-
-        let evaluation: Record<string, unknown>;
-        if (!startPrice || !startDate) {
-          evaluation = {
-            analysisDate,
-            evalWindowDays,
-            engineVersion,
-            evalStatus: 'insufficient_data',
-            operationAdvice: candidate.operationAdvice,
-          };
-          insufficient += 1;
-        } else {
-          evaluation = BacktestEngine.evaluateSingle({
-            operationAdvice: candidate.operationAdvice,
-            analysisDate: startDate,
-            startPrice,
-            forwardBars: marketBars.forwardBars,
-            stopLoss: candidate.stopLoss,
-            takeProfit: candidate.takeProfit,
-            config: {
-              evalWindowDays,
-              neutralBandPct,
-              engineVersion,
-            },
-          });
-
-          if (evaluation.evalStatus === 'completed') completed += 1;
-          else if (evaluation.evalStatus === 'insufficient_data') insufficient += 1;
-          else errors += 1;
-        }
-
-        await this.prisma.backtestResult.upsert({
-          where: {
-            analysisHistoryId_evalWindowDays_engineVersion: {
-              analysisHistoryId: candidate.id,
-              evalWindowDays,
-              engineVersion,
-            },
-          },
-          update: {
-            ownerUserId: candidate.ownerUserId,
-            code: candidate.code,
-            analysisDate: (evaluation.analysisDate as Date | undefined) ?? null,
-            evalStatus: String(evaluation.evalStatus ?? 'error'),
-            operationAdvice: (evaluation.operationAdvice as string | undefined) ?? candidate.operationAdvice,
-            positionRecommendation: (evaluation.positionRecommendation as string | undefined) ?? null,
-            startPrice: (evaluation.startPrice as number | undefined) ?? null,
-            endClose: (evaluation.endClose as number | undefined) ?? null,
-            maxHigh: (evaluation.maxHigh as number | undefined) ?? null,
-            minLow: (evaluation.minLow as number | undefined) ?? null,
-            stockReturnPct: (evaluation.stockReturnPct as number | undefined) ?? null,
-            directionExpected: (evaluation.directionExpected as string | undefined) ?? null,
-            directionCorrect: (evaluation.directionCorrect as boolean | null | undefined) ?? null,
-            outcome: (evaluation.outcome as string | undefined) ?? null,
-            stopLoss: (evaluation.stopLoss as number | undefined) ?? null,
-            takeProfit: (evaluation.takeProfit as number | undefined) ?? null,
-            hitStopLoss: (evaluation.hitStopLoss as boolean | null | undefined) ?? null,
-            hitTakeProfit: (evaluation.hitTakeProfit as boolean | null | undefined) ?? null,
-            firstHit: (evaluation.firstHit as string | undefined) ?? null,
-            firstHitDate: (evaluation.firstHitDate as Date | undefined) ?? null,
-            firstHitTradingDays: (evaluation.firstHitTradingDays as number | undefined) ?? null,
-            simulatedEntryPrice: (evaluation.simulatedEntryPrice as number | undefined) ?? null,
-            simulatedExitPrice: (evaluation.simulatedExitPrice as number | undefined) ?? null,
-            simulatedExitReason: (evaluation.simulatedExitReason as string | undefined) ?? null,
-            simulatedReturnPct: (evaluation.simulatedReturnPct as number | undefined) ?? null,
-            evaluatedAt: new Date(),
-          },
-          create: {
-            ownerUserId: candidate.ownerUserId,
-            analysisHistoryId: candidate.id,
-            code: candidate.code,
-            analysisDate: (evaluation.analysisDate as Date | undefined) ?? null,
-            evalWindowDays,
-            engineVersion,
-            evalStatus: String(evaluation.evalStatus ?? 'error'),
-            operationAdvice: (evaluation.operationAdvice as string | undefined) ?? candidate.operationAdvice,
-            positionRecommendation: (evaluation.positionRecommendation as string | undefined) ?? null,
-            startPrice: (evaluation.startPrice as number | undefined) ?? null,
-            endClose: (evaluation.endClose as number | undefined) ?? null,
-            maxHigh: (evaluation.maxHigh as number | undefined) ?? null,
-            minLow: (evaluation.minLow as number | undefined) ?? null,
-            stockReturnPct: (evaluation.stockReturnPct as number | undefined) ?? null,
-            directionExpected: (evaluation.directionExpected as string | undefined) ?? null,
-            directionCorrect: (evaluation.directionCorrect as boolean | null | undefined) ?? null,
-            outcome: (evaluation.outcome as string | undefined) ?? null,
-            stopLoss: (evaluation.stopLoss as number | undefined) ?? null,
-            takeProfit: (evaluation.takeProfit as number | undefined) ?? null,
-            hitStopLoss: (evaluation.hitStopLoss as boolean | null | undefined) ?? null,
-            hitTakeProfit: (evaluation.hitTakeProfit as boolean | null | undefined) ?? null,
-            firstHit: (evaluation.firstHit as string | undefined) ?? null,
-            firstHitDate: (evaluation.firstHitDate as Date | undefined) ?? null,
-            firstHitTradingDays: (evaluation.firstHitTradingDays as number | undefined) ?? null,
-            simulatedEntryPrice: (evaluation.simulatedEntryPrice as number | undefined) ?? null,
-            simulatedExitPrice: (evaluation.simulatedExitPrice as number | undefined) ?? null,
-            simulatedExitReason: (evaluation.simulatedExitReason as string | undefined) ?? null,
-            simulatedReturnPct: (evaluation.simulatedReturnPct as number | undefined) ?? null,
-            evaluatedAt: new Date(),
-          },
-        });
-
-        saved += 1;
-      } catch {
-        errors += 1;
-      }
+  private toIsoDay(value: Date | null | undefined): string | null {
+    if (!value || Number.isNaN(value.getTime())) {
+      return null;
     }
+    return value.toISOString().slice(0, 10);
+  }
 
-    if (saved > 0) {
-      await this.recomputeSummaries(evalWindowDays, engineVersion, touchedCodesByOwner);
-    }
+  private summaryRowsPayload(
+    rows: Array<{
+      evalStatus: string;
+      positionRecommendation: string | null;
+      outcome: string | null;
+      directionCorrect: boolean | null;
+      stockReturnPct: number | null;
+      simulatedReturnPct: number | null;
+      hitStopLoss: boolean | null;
+      hitTakeProfit: boolean | null;
+      firstHit: string | null;
+      firstHitTradingDays: number | null;
+      operationAdvice: string | null;
+    }>,
+  ): Array<Record<string, unknown>> {
+    return rows.map((row) => ({
+      eval_status: row.evalStatus,
+      position_recommendation: row.positionRecommendation,
+      outcome: row.outcome,
+      direction_correct: row.directionCorrect,
+      stock_return_pct: row.stockReturnPct,
+      simulated_return_pct: row.simulatedReturnPct,
+      hit_stop_loss: row.hitStopLoss,
+      hit_take_profit: row.hitTakeProfit,
+      first_hit: row.firstHit,
+      first_hit_trading_days: row.firstHitTradingDays,
+      operation_advice: row.operationAdvice,
+    }));
+  }
+
+  private normalizeSummaryPayload(summaryRaw: Record<string, unknown>, fallback: {
+    scope: string;
+    code: string | null;
+    evalWindowDays: number;
+    engineVersion: string;
+  }): {
+    scope: string;
+    code: string | null;
+    evalWindowDays: number;
+    engineVersion: string;
+    totalEvaluations: number;
+    completedCount: number;
+    insufficientCount: number;
+    longCount: number;
+    cashCount: number;
+    winCount: number;
+    lossCount: number;
+    neutralCount: number;
+    directionAccuracyPct: number | null;
+    predictionWinRatePct: number | null;
+    tradeWinRatePct: number | null;
+    winRatePct: number | null;
+    neutralRatePct: number | null;
+    avgStockReturnPct: number | null;
+    avgSimulatedReturnPct: number | null;
+    stopLossTriggerRate: number | null;
+    takeProfitTriggerRate: number | null;
+    ambiguousRate: number | null;
+    avgDaysToFirstHit: number | null;
+    adviceBreakdown: unknown;
+    diagnostics: unknown;
+  } {
+    const scope = String(summaryRaw.scope ?? fallback.scope);
+    const code = (summaryRaw.code == null ? fallback.code : String(summaryRaw.code)) ?? fallback.code;
+    const evalWindowDays = Number(summaryRaw.eval_window_days ?? fallback.evalWindowDays);
+    const engineVersion = String(summaryRaw.engine_version ?? fallback.engineVersion);
 
     return {
-      processed,
-      saved,
-      completed,
-      insufficient,
-      errors,
+      scope,
+      code,
+      evalWindowDays,
+      engineVersion,
+      totalEvaluations: Number(summaryRaw.total_evaluations ?? 0),
+      completedCount: Number(summaryRaw.completed_count ?? 0),
+      insufficientCount: Number(summaryRaw.insufficient_count ?? 0),
+      longCount: Number(summaryRaw.long_count ?? 0),
+      cashCount: Number(summaryRaw.cash_count ?? 0),
+      winCount: Number(summaryRaw.win_count ?? 0),
+      lossCount: Number(summaryRaw.loss_count ?? 0),
+      neutralCount: Number(summaryRaw.neutral_count ?? 0),
+      directionAccuracyPct: this.toNumber(summaryRaw.direction_accuracy_pct),
+      predictionWinRatePct: this.toNumber(summaryRaw.prediction_win_rate_pct ?? summaryRaw.win_rate_pct),
+      tradeWinRatePct: this.toNumber(summaryRaw.trade_win_rate_pct ?? summaryRaw.win_rate_pct),
+      winRatePct: this.toNumber(summaryRaw.win_rate_pct ?? summaryRaw.prediction_win_rate_pct),
+      neutralRatePct: this.toNumber(summaryRaw.neutral_rate_pct),
+      avgStockReturnPct: this.toNumber(summaryRaw.avg_stock_return_pct),
+      avgSimulatedReturnPct: this.toNumber(summaryRaw.avg_simulated_return_pct),
+      stopLossTriggerRate: this.toNumber(summaryRaw.stop_loss_trigger_rate),
+      takeProfitTriggerRate: this.toNumber(summaryRaw.take_profit_trigger_rate),
+      ambiguousRate: this.toNumber(summaryRaw.ambiguous_rate),
+      avgDaysToFirstHit: this.toNumber(summaryRaw.avg_days_to_first_hit),
+      adviceBreakdown: summaryRaw.advice_breakdown ?? {},
+      diagnostics: summaryRaw.diagnostics ?? {},
     };
   }
 
-  private async recomputeSummaries(
-    evalWindowDays: number,
-    engineVersion: string,
-    touchedCodesByOwner: Map<number | null, Set<string>>,
-  ): Promise<void> {
-    for (const [ownerUserId, touchedCodes] of touchedCodesByOwner.entries()) {
-      const ownerWhere = ownerUserId == null ? { ownerUserId: null } : { ownerUserId };
-
-      const overallRows = await this.prisma.backtestResult.findMany({
-        where: { ...ownerWhere, evalWindowDays, engineVersion },
-      });
-
-      const overall = BacktestEngine.computeSummary({
-        results: overallRows,
-        scope: 'overall',
-        code: OVERALL_SENTINEL_CODE,
-        evalWindowDays,
-        engineVersion,
-      });
-
-      await this.upsertSummary(overall, ownerUserId);
-
-      for (const code of touchedCodes) {
-        const rows = await this.prisma.backtestResult.findMany({
-          where: { ...ownerWhere, code, evalWindowDays, engineVersion },
-        });
-
-        const summary = BacktestEngine.computeSummary({
-          results: rows,
-          scope: 'stock',
-          code,
-          evalWindowDays,
-          engineVersion,
-        });
-
-        await this.upsertSummary(summary, ownerUserId);
-      }
-    }
+  private async computeSummaryViaAgent(input: {
+    scope: 'overall' | 'stock';
+    code: string;
+    evalWindowDays: number;
+    engineVersion: string;
+    rows: Array<{
+      evalStatus: string;
+      positionRecommendation: string | null;
+      outcome: string | null;
+      directionCorrect: boolean | null;
+      stockReturnPct: number | null;
+      simulatedReturnPct: number | null;
+      hitStopLoss: boolean | null;
+      hitTakeProfit: boolean | null;
+      firstHit: string | null;
+      firstHitTradingDays: number | null;
+      operationAdvice: string | null;
+    }>;
+  }): Promise<Record<string, unknown>> {
+    const payload = {
+      scope: input.scope,
+      code: input.scope === 'overall' ? OVERALL_SENTINEL_CODE : input.code,
+      eval_window_days: input.evalWindowDays,
+      engine_version: input.engineVersion,
+      neutral_band_pct: Math.abs(Number(process.env.BACKTEST_NEUTRAL_BAND_PCT ?? 2.0)),
+      rows: this.summaryRowsPayload(input.rows),
+    };
+    const summaryRaw = await this.backtestAgentClient.summary(payload);
+    const normalized = this.normalizeSummaryPayload(summaryRaw, {
+      scope: input.scope,
+      code: payload.code,
+      evalWindowDays: input.evalWindowDays,
+      engineVersion: input.engineVersion,
+    });
+    return this.mapSummary(normalized);
   }
 
-  private async upsertSummary(summary: Record<string, unknown>, ownerUserId: number | null): Promise<void> {
-    const scope = String(summary.scope);
-    const code = String(summary.code);
-    const evalWindowDays = Number(summary.evalWindowDays);
-    const engineVersion = String(summary.engineVersion);
+  private async upsertSummaryFromPayload(summaryPayload: Record<string, unknown>, ownerUserId: number | null): Promise<void> {
+    const scope = String(summaryPayload.scope ?? 'overall');
+    const code = String(summaryPayload.code ?? OVERALL_SENTINEL_CODE);
+    const evalWindowDays = Number(summaryPayload.eval_window_days ?? this.defaultEvalWindowDays());
+    const engineVersion = String(summaryPayload.engine_version ?? process.env.BACKTEST_ENGINE_VERSION ?? 'v1');
+
     const data = {
       ownerUserId,
       scope,
@@ -405,25 +412,27 @@ export class BacktestService {
       evalWindowDays,
       engineVersion,
       computedAt: new Date(),
-      totalEvaluations: Number(summary.totalEvaluations ?? 0),
-      completedCount: Number(summary.completedCount ?? 0),
-      insufficientCount: Number(summary.insufficientCount ?? 0),
-      longCount: Number(summary.longCount ?? 0),
-      cashCount: Number(summary.cashCount ?? 0),
-      winCount: Number(summary.winCount ?? 0),
-      lossCount: Number(summary.lossCount ?? 0),
-      neutralCount: Number(summary.neutralCount ?? 0),
-      directionAccuracyPct: (summary.directionAccuracyPct as number | null) ?? null,
-      winRatePct: (summary.winRatePct as number | null) ?? null,
-      neutralRatePct: (summary.neutralRatePct as number | null) ?? null,
-      avgStockReturnPct: (summary.avgStockReturnPct as number | null) ?? null,
-      avgSimulatedReturnPct: (summary.avgSimulatedReturnPct as number | null) ?? null,
-      stopLossTriggerRate: (summary.stopLossTriggerRate as number | null) ?? null,
-      takeProfitTriggerRate: (summary.takeProfitTriggerRate as number | null) ?? null,
-      ambiguousRate: (summary.ambiguousRate as number | null) ?? null,
-      avgDaysToFirstHit: (summary.avgDaysToFirstHit as number | null) ?? null,
-      adviceBreakdownJson: safeJsonStringify(summary.adviceBreakdown),
-      diagnosticsJson: safeJsonStringify(summary.diagnostics),
+      totalEvaluations: Number(summaryPayload.total_evaluations ?? 0),
+      completedCount: Number(summaryPayload.completed_count ?? 0),
+      insufficientCount: Number(summaryPayload.insufficient_count ?? 0),
+      longCount: Number(summaryPayload.long_count ?? 0),
+      cashCount: Number(summaryPayload.cash_count ?? 0),
+      winCount: Number(summaryPayload.win_count ?? 0),
+      lossCount: Number(summaryPayload.loss_count ?? 0),
+      neutralCount: Number(summaryPayload.neutral_count ?? 0),
+      directionAccuracyPct: this.toNumber(summaryPayload.direction_accuracy_pct),
+      predictionWinRatePct: this.toNumber(summaryPayload.prediction_win_rate_pct ?? summaryPayload.win_rate_pct),
+      tradeWinRatePct: this.toNumber(summaryPayload.trade_win_rate_pct ?? summaryPayload.win_rate_pct),
+      winRatePct: this.toNumber(summaryPayload.win_rate_pct ?? summaryPayload.prediction_win_rate_pct),
+      neutralRatePct: this.toNumber(summaryPayload.neutral_rate_pct),
+      avgStockReturnPct: this.toNumber(summaryPayload.avg_stock_return_pct),
+      avgSimulatedReturnPct: this.toNumber(summaryPayload.avg_simulated_return_pct),
+      stopLossTriggerRate: this.toNumber(summaryPayload.stop_loss_trigger_rate),
+      takeProfitTriggerRate: this.toNumber(summaryPayload.take_profit_trigger_rate),
+      ambiguousRate: this.toNumber(summaryPayload.ambiguous_rate),
+      avgDaysToFirstHit: this.toNumber(summaryPayload.avg_days_to_first_hit),
+      adviceBreakdownJson: safeJsonStringify(summaryPayload.advice_breakdown ?? {}),
+      diagnosticsJson: safeJsonStringify(summaryPayload.diagnostics ?? {}),
     };
 
     if (ownerUserId == null) {
@@ -440,11 +449,11 @@ export class BacktestService {
       if (existing) {
         await this.prisma.backtestSummary.update({
           where: { id: existing.id },
-          data,
+          data: data as any,
         });
         return;
       }
-      await this.prisma.backtestSummary.create({ data });
+      await this.prisma.backtestSummary.create({ data: data as any });
       return;
     }
 
@@ -458,9 +467,459 @@ export class BacktestService {
           engineVersion,
         },
       },
-      update: data,
-      create: data,
+      update: data as any,
+      create: data as any,
     });
+  }
+
+  private async recomputeSummaries(
+    evalWindowDays: number,
+    engineVersion: string,
+    touchedCodesByOwner: Map<number | null, Set<string>>,
+  ): Promise<void> {
+    for (const [ownerUserId, touchedCodes] of touchedCodesByOwner.entries()) {
+      const ownerWhere = ownerUserId == null ? { ownerUserId: null } : { ownerUserId };
+
+      const overallRows = await this.prisma.backtestResult.findMany({
+        where: { ...ownerWhere, evalWindowDays, engineVersion },
+        select: {
+          evalStatus: true,
+          positionRecommendation: true,
+          outcome: true,
+          directionCorrect: true,
+          stockReturnPct: true,
+          simulatedReturnPct: true,
+          hitStopLoss: true,
+          hitTakeProfit: true,
+          firstHit: true,
+          firstHitTradingDays: true,
+          operationAdvice: true,
+        },
+      });
+
+      const overallSummary = await this.computeSummaryViaAgent({
+        scope: 'overall',
+        code: OVERALL_SENTINEL_CODE,
+        evalWindowDays,
+        engineVersion,
+        rows: overallRows,
+      });
+      await this.upsertSummaryFromPayload(overallSummary, ownerUserId);
+
+      for (const code of touchedCodes) {
+        const rows = await this.prisma.backtestResult.findMany({
+          where: { ...ownerWhere, code, evalWindowDays, engineVersion },
+          select: {
+            evalStatus: true,
+            positionRecommendation: true,
+            outcome: true,
+            directionCorrect: true,
+            stockReturnPct: true,
+            simulatedReturnPct: true,
+            hitStopLoss: true,
+            hitTakeProfit: true,
+            firstHit: true,
+            firstHitTradingDays: true,
+            operationAdvice: true,
+          },
+        });
+
+        const summary = await this.computeSummaryViaAgent({
+          scope: 'stock',
+          code,
+          evalWindowDays,
+          engineVersion,
+          rows,
+        });
+        await this.upsertSummaryFromPayload(summary, ownerUserId);
+      }
+    }
+  }
+
+  private mergeTouchedCodes(
+    target: Map<number | null, Set<string>>,
+    incoming: Map<number | null, Set<string>>,
+  ): void {
+    for (const [ownerUserId, codes] of incoming.entries()) {
+      if (!target.has(ownerUserId)) {
+        target.set(ownerUserId, new Set<string>());
+      }
+      const merged = target.get(ownerUserId)!;
+      for (const code of codes) {
+        merged.add(code);
+      }
+    }
+  }
+
+  private async executeBacktestCandidates(input: {
+    candidates: Array<{
+      id: number;
+      ownerUserId: number | null;
+      code: string;
+      createdAt: Date;
+      contextSnapshot: string | null;
+      operationAdvice: string | null;
+      stopLoss: number | null;
+      takeProfit: number | null;
+    }>;
+    code?: string;
+    force: boolean;
+    evalWindowDays: number;
+    minAgeDays: number;
+    limit: number;
+    engineVersion: string;
+    neutralBandPct: number;
+  }): Promise<{
+    processed: number;
+    saved: number;
+    completed: number;
+    insufficient: number;
+    errors: number;
+    touchedCodesByOwner: Map<number | null, Set<string>>;
+  }> {
+    if (input.candidates.length === 0) {
+      return {
+        processed: 0,
+        saved: 0,
+        completed: 0,
+        insufficient: 0,
+        errors: 0,
+        touchedCodesByOwner: new Map<number | null, Set<string>>(),
+      };
+    }
+
+    const candidateById = new Map(
+      input.candidates.map((item) => [item.id, item]),
+    );
+
+    const runPayload = await this.backtestAgentClient.run({
+      code: input.code,
+      force: input.force,
+      eval_window_days: input.evalWindowDays,
+      min_age_days: input.minAgeDays,
+      limit: input.limit,
+      engine_version: input.engineVersion,
+      neutral_band_pct: input.neutralBandPct,
+      candidates: input.candidates.map((item) => ({
+        analysis_history_id: item.id,
+        owner_user_id: item.ownerUserId,
+        code: item.code,
+        created_at: item.createdAt.toISOString(),
+        context_snapshot: item.contextSnapshot,
+        operation_advice: item.operationAdvice,
+        stop_loss: item.stopLoss,
+        take_profit: item.takeProfit,
+      })),
+    });
+
+    const itemPayload = asArrayOfRecords(runPayload.items);
+    const touchedCodesByOwner = new Map<number | null, Set<string>>();
+
+    let saved = 0;
+    let completed = 0;
+    let insufficient = 0;
+    let errors = Number(runPayload.errors ?? 0);
+
+    for (const item of itemPayload) {
+      const analysisHistoryId = Number(item.analysis_history_id ?? 0);
+      if (!Number.isFinite(analysisHistoryId) || analysisHistoryId <= 0) {
+        errors += 1;
+        continue;
+      }
+
+      const candidate = candidateById.get(analysisHistoryId);
+      if (!candidate) {
+        errors += 1;
+        continue;
+      }
+
+      const evalStatus = String(item.eval_status ?? 'error');
+      if (evalStatus === 'completed') completed += 1;
+      else if (evalStatus === 'insufficient_data') insufficient += 1;
+      else errors += 1;
+
+      const ownerCandidate = item.owner_user_id != null
+        ? this.toNumber(item.owner_user_id)
+        : candidate.ownerUserId;
+      const ownerUserId = ownerCandidate == null ? null : Math.trunc(ownerCandidate);
+      const code = String(item.code ?? candidate.code);
+
+      if (!touchedCodesByOwner.has(ownerUserId)) {
+        touchedCodesByOwner.set(ownerUserId, new Set<string>());
+      }
+      touchedCodesByOwner.get(ownerUserId)!.add(code);
+
+      const analysisDate = this.toDate(item.analysis_date) ?? this.resolveAnalysisDate(candidate.contextSnapshot, candidate.createdAt);
+
+      try {
+        await this.prisma.backtestResult.upsert({
+          where: {
+            analysisHistoryId_evalWindowDays_engineVersion: {
+              analysisHistoryId,
+              evalWindowDays: input.evalWindowDays,
+              engineVersion: input.engineVersion,
+            },
+          },
+          update: {
+            ownerUserId,
+            code,
+            analysisDate,
+            evalStatus,
+            operationAdvice: String(item.operation_advice ?? candidate.operationAdvice ?? ''),
+            positionRecommendation: (item.position_recommendation as string | undefined) ?? null,
+            startPrice: this.toNumber(item.start_price),
+            endClose: this.toNumber(item.end_close),
+            maxHigh: this.toNumber(item.max_high),
+            minLow: this.toNumber(item.min_low),
+            stockReturnPct: this.toNumber(item.stock_return_pct),
+            directionExpected: (item.direction_expected as string | undefined) ?? null,
+            directionCorrect: this.toBoolean(item.direction_correct),
+            outcome: (item.outcome as string | undefined) ?? null,
+            stopLoss: this.toNumber(item.stop_loss),
+            takeProfit: this.toNumber(item.take_profit),
+            hitStopLoss: this.toBoolean(item.hit_stop_loss),
+            hitTakeProfit: this.toBoolean(item.hit_take_profit),
+            firstHit: (item.first_hit as string | undefined) ?? null,
+            firstHitDate: this.toDate(item.first_hit_date),
+            firstHitTradingDays: this.toNumber(item.first_hit_trading_days),
+            simulatedEntryPrice: this.toNumber(item.simulated_entry_price),
+            simulatedExitPrice: this.toNumber(item.simulated_exit_price),
+            simulatedExitReason: (item.simulated_exit_reason as string | undefined) ?? null,
+            simulatedReturnPct: this.toNumber(item.simulated_return_pct),
+            evaluatedAt: new Date(),
+          },
+          create: {
+            ownerUserId,
+            analysisHistoryId,
+            code,
+            analysisDate,
+            evalWindowDays: input.evalWindowDays,
+            engineVersion: input.engineVersion,
+            evalStatus,
+            operationAdvice: String(item.operation_advice ?? candidate.operationAdvice ?? ''),
+            positionRecommendation: (item.position_recommendation as string | undefined) ?? null,
+            startPrice: this.toNumber(item.start_price),
+            endClose: this.toNumber(item.end_close),
+            maxHigh: this.toNumber(item.max_high),
+            minLow: this.toNumber(item.min_low),
+            stockReturnPct: this.toNumber(item.stock_return_pct),
+            directionExpected: (item.direction_expected as string | undefined) ?? null,
+            directionCorrect: this.toBoolean(item.direction_correct),
+            outcome: (item.outcome as string | undefined) ?? null,
+            stopLoss: this.toNumber(item.stop_loss),
+            takeProfit: this.toNumber(item.take_profit),
+            hitStopLoss: this.toBoolean(item.hit_stop_loss),
+            hitTakeProfit: this.toBoolean(item.hit_take_profit),
+            firstHit: (item.first_hit as string | undefined) ?? null,
+            firstHitDate: this.toDate(item.first_hit_date),
+            firstHitTradingDays: this.toNumber(item.first_hit_trading_days),
+            simulatedEntryPrice: this.toNumber(item.simulated_entry_price),
+            simulatedExitPrice: this.toNumber(item.simulated_exit_price),
+            simulatedExitReason: (item.simulated_exit_reason as string | undefined) ?? null,
+            simulatedReturnPct: this.toNumber(item.simulated_return_pct),
+            evaluatedAt: new Date(),
+          },
+        });
+        saved += 1;
+      } catch (error: unknown) {
+        errors += 1;
+        this.logger.error(
+          `Failed to upsert backtest_result analysisHistoryId=${analysisHistoryId} code=${code} evalStatus=${evalStatus}`,
+          (error as Error)?.stack ?? String((error as Error)?.message ?? error),
+        );
+      }
+    }
+
+    return {
+      processed: input.candidates.length,
+      saved,
+      completed,
+      insufficient,
+      errors,
+      touchedCodesByOwner,
+    };
+  }
+
+  async run(input: {
+    code?: string;
+    force: boolean;
+    evalWindowDays?: number;
+    minAgeDays?: number;
+    limit: number;
+    scope: { userId: number; includeAll: boolean };
+  }): Promise<Record<string, number>> {
+    const evalWindowRaw = Number(input.evalWindowDays ?? process.env.BACKTEST_EVAL_WINDOW_DAYS ?? 10);
+    const evalWindowDays = Number.isFinite(evalWindowRaw) && evalWindowRaw > 0 ? Math.trunc(evalWindowRaw) : 10;
+    const minAgeFloor = Math.max(14, Math.trunc(evalWindowDays));
+    const requestedMinAgeDays = Number(input.minAgeDays ?? process.env.BACKTEST_MIN_AGE_DAYS ?? minAgeFloor);
+    const minAgeDays = Math.max(minAgeFloor, Number.isFinite(requestedMinAgeDays) ? Math.trunc(requestedMinAgeDays) : minAgeFloor);
+    const engineVersion = String(process.env.BACKTEST_ENGINE_VERSION ?? 'v1');
+    const neutralBandPct = Number(process.env.BACKTEST_NEUTRAL_BAND_PCT ?? 2.0);
+
+    const cutoff = new Date(Date.now() - minAgeDays * 24 * 3600 * 1000);
+
+    const candidates = await this.prisma.analysisHistory.findMany({
+      where: {
+        ...(input.scope.includeAll ? {} : { ownerUserId: input.scope.userId }),
+        ...(input.code ? { code: input.code } : {}),
+        createdAt: { lte: cutoff },
+        ...(input.force
+          ? {}
+          : {
+              backtestResults: {
+                none: {
+                  evalWindowDays,
+                  engineVersion,
+                },
+              },
+            }),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: input.limit,
+      select: {
+        id: true,
+        ownerUserId: true,
+        code: true,
+        createdAt: true,
+        contextSnapshot: true,
+        operationAdvice: true,
+        stopLoss: true,
+        takeProfit: true,
+      },
+    });
+
+    if (candidates.length === 0) {
+      return {
+        processed: 0,
+        saved: 0,
+        completed: 0,
+        insufficient: 0,
+        errors: 0,
+      };
+    }
+
+    const result = await this.executeBacktestCandidates({
+      candidates,
+      code: input.code,
+      force: input.force,
+      evalWindowDays,
+      minAgeDays,
+      limit: input.limit,
+      engineVersion,
+      neutralBandPct,
+    });
+
+    if (result.saved > 0) {
+      await this.recomputeSummaries(evalWindowDays, engineVersion, result.touchedCodesByOwner);
+    }
+
+    return {
+      processed: candidates.length,
+      saved: result.saved,
+      completed: result.completed,
+      insufficient: result.insufficient,
+      errors: result.errors,
+    };
+  }
+
+  async recomputeAll(input: {
+    evalWindowDays?: number;
+    minAgeDays?: number;
+    batchSize?: number;
+    scope: { userId: number; includeAll: boolean };
+  }): Promise<Record<string, number>> {
+    const evalWindowRaw = Number(input.evalWindowDays ?? process.env.BACKTEST_EVAL_WINDOW_DAYS ?? 10);
+    const evalWindowDays = Number.isFinite(evalWindowRaw) && evalWindowRaw > 0 ? Math.trunc(evalWindowRaw) : 10;
+    const minAgeFloor = Math.max(14, Math.trunc(evalWindowDays));
+    const requestedMinAgeDays = Number(input.minAgeDays ?? process.env.BACKTEST_MIN_AGE_DAYS ?? minAgeFloor);
+    const minAgeDays = Math.max(minAgeFloor, Number.isFinite(requestedMinAgeDays) ? Math.trunc(requestedMinAgeDays) : minAgeFloor);
+    const engineVersion = String(process.env.BACKTEST_ENGINE_VERSION ?? 'v1');
+    const neutralBandPct = Number(process.env.BACKTEST_NEUTRAL_BAND_PCT ?? 2.0);
+    const batchSize = Math.min(Math.max(Math.trunc(Number(input.batchSize ?? 500)), 1), 5000);
+    const cutoff = new Date(Date.now() - minAgeDays * 24 * 3600 * 1000);
+
+    const ownerFilter = input.scope.includeAll ? {} : { ownerUserId: input.scope.userId };
+    const ownerWhereSummary = input.scope.includeAll ? {} : { ownerUserId: input.scope.userId };
+
+    await this.prisma.backtestResult.deleteMany({
+      where: {
+        ...ownerFilter,
+        evalWindowDays,
+        engineVersion,
+      },
+    });
+    await this.prisma.backtestSummary.deleteMany({
+      where: {
+        ...ownerWhereSummary,
+        evalWindowDays,
+        engineVersion,
+      },
+    });
+
+    let cursorId = 0;
+    let processed = 0;
+    let saved = 0;
+    let completed = 0;
+    let insufficient = 0;
+    let errors = 0;
+    const touchedCodesByOwner = new Map<number | null, Set<string>>();
+
+    while (true) {
+      const candidates = await this.prisma.analysisHistory.findMany({
+        where: {
+          ...ownerFilter,
+          createdAt: { lte: cutoff },
+          id: { gt: cursorId },
+        },
+        orderBy: { id: 'asc' },
+        take: batchSize,
+        select: {
+          id: true,
+          ownerUserId: true,
+          code: true,
+          createdAt: true,
+          contextSnapshot: true,
+          operationAdvice: true,
+          stopLoss: true,
+          takeProfit: true,
+        },
+      });
+
+      if (candidates.length === 0) {
+        break;
+      }
+
+      const batchResult = await this.executeBacktestCandidates({
+        candidates,
+        force: true,
+        evalWindowDays,
+        minAgeDays,
+        limit: batchSize,
+        engineVersion,
+        neutralBandPct,
+      });
+
+      processed += batchResult.processed;
+      saved += batchResult.saved;
+      completed += batchResult.completed;
+      insufficient += batchResult.insufficient;
+      errors += batchResult.errors;
+      this.mergeTouchedCodes(touchedCodesByOwner, batchResult.touchedCodesByOwner);
+
+      cursorId = candidates[candidates.length - 1].id;
+    }
+
+    if (saved > 0) {
+      await this.recomputeSummaries(evalWindowDays, engineVersion, touchedCodesByOwner);
+    }
+
+    return {
+      processed,
+      saved,
+      completed,
+      insufficient,
+      errors,
+    };
   }
 
   async listResults(input: {
@@ -470,9 +929,10 @@ export class BacktestService {
     limit: number;
     scope: { userId: number; includeAll: boolean };
   }): Promise<Record<string, unknown>> {
+    const resolvedEvalWindowDays = Number(input.evalWindowDays ?? this.defaultEvalWindowDays());
     const where: Prisma.BacktestResultWhereInput = this.buildOwnerFilter(input.scope);
     if (input.code) where.code = input.code;
-    if (input.evalWindowDays != null) where.evalWindowDays = input.evalWindowDays;
+    where.evalWindowDays = resolvedEvalWindowDays;
 
     const total = await this.prisma.backtestResult.count({ where });
     const rows = await this.prisma.backtestResult.findMany({
@@ -486,6 +946,9 @@ export class BacktestService {
       total,
       page: input.page,
       limit: input.limit,
+      eval_window_days: resolvedEvalWindowDays,
+      metric_definition_version: 'v2',
+      warnings: input.evalWindowDays == null ? ['eval_window_days not provided, default window applied'] : [],
       items: rows.map((row) => ({
         analysis_history_id: row.analysisHistoryId,
         code: row.code,
@@ -524,6 +987,7 @@ export class BacktestService {
     scope: 'overall' | 'stock';
     code?: string;
     evalWindowDays?: number;
+    equityMode?: 'portfolio' | 'sequential';
     requester: { userId: number; includeAll: boolean };
   }): Promise<Record<string, unknown>> {
     const evalWindowDays = Number(input.evalWindowDays ?? this.defaultEvalWindowDays());
@@ -538,6 +1002,8 @@ export class BacktestService {
     const rows = await this.prisma.backtestResult.findMany({
       where,
       select: {
+        analysisHistoryId: true,
+        code: true,
         analysisDate: true,
         evaluatedAt: true,
         simulatedReturnPct: true,
@@ -546,11 +1012,31 @@ export class BacktestService {
       },
     });
 
+    const payload = await this.backtestAgentClient.curves({
+      scope: input.scope,
+      code: input.scope === 'stock' ? lookupCode : null,
+      eval_window_days: evalWindowDays,
+      equity_mode: input.equityMode ?? 'portfolio',
+      rows: rows.map((row) => ({
+        analysis_history_id: row.analysisHistoryId,
+        code: row.code,
+        analysis_date: row.analysisDate?.toISOString().slice(0, 10) ?? null,
+        evaluated_at: row.evaluatedAt.toISOString(),
+        simulated_return_pct: row.simulatedReturnPct,
+        stock_return_pct: row.stockReturnPct,
+        eval_status: row.evalStatus,
+      })),
+    });
+
     return {
       scope: input.scope,
       code: input.scope === 'stock' ? lookupCode : null,
       eval_window_days: evalWindowDays,
-      curves: this.buildCurves(rows),
+      equity_mode: String(payload.equity_mode ?? input.equityMode ?? 'portfolio'),
+      metric_definition_version: String(payload.metric_definition_version ?? 'v2'),
+      curves: Array.isArray(payload.curves) ? payload.curves : [],
+      signal_curves: Array.isArray(payload.signal_curves) ? payload.signal_curves : [],
+      portfolio_curves: Array.isArray(payload.portfolio_curves) ? payload.portfolio_curves : [],
     };
   }
 
@@ -570,40 +1056,56 @@ export class BacktestService {
       requester: input.requester,
     });
 
-    const rows = await this.prisma.backtestResult.findMany({ where });
-    if (rows.length === 0) {
-      return {
-        scope: input.scope,
-        code: input.scope === 'stock' ? lookupCode : null,
-        eval_window_days: evalWindowDays,
-        distribution: {
-          long_count: 0,
-          cash_count: 0,
-          win_count: 0,
-          loss_count: 0,
-          neutral_count: 0,
-        },
-      };
-    }
-
-    const summary = BacktestEngine.computeSummary({
-      results: rows,
-      scope: input.scope,
-      code: lookupCode,
-      evalWindowDays,
-      engineVersion,
+    const rows = await this.prisma.backtestResult.findMany({
+      where,
+      select: {
+        evalStatus: true,
+        positionRecommendation: true,
+        outcome: true,
+        directionCorrect: true,
+        stockReturnPct: true,
+        simulatedReturnPct: true,
+        hitStopLoss: true,
+        hitTakeProfit: true,
+        firstHit: true,
+        firstHitTradingDays: true,
+        operationAdvice: true,
+      },
     });
+
+    const payload = await this.backtestAgentClient.distribution({
+      scope: input.scope,
+      code: input.scope === 'stock' ? lookupCode : null,
+      eval_window_days: evalWindowDays,
+      engine_version: engineVersion,
+      neutral_band_pct: Math.abs(Number(process.env.BACKTEST_NEUTRAL_BAND_PCT ?? 2.0)),
+      rows: this.summaryRowsPayload(rows),
+    });
+
+    const distribution = asRecord(payload.distribution);
+    const positionDistribution = asRecord(distribution.position_distribution);
+    const outcomeDistribution = asRecord(distribution.outcome_distribution);
 
     return {
       scope: input.scope,
       code: input.scope === 'stock' ? lookupCode : null,
       eval_window_days: evalWindowDays,
+      metric_definition_version: String(payload.metric_definition_version ?? 'v2'),
       distribution: {
-        long_count: Number(summary.longCount ?? 0),
-        cash_count: Number(summary.cashCount ?? 0),
-        win_count: Number(summary.winCount ?? 0),
-        loss_count: Number(summary.lossCount ?? 0),
-        neutral_count: Number(summary.neutralCount ?? 0),
+        position_distribution: {
+          long_count: Number(positionDistribution.long_count ?? distribution.long_count ?? 0),
+          cash_count: Number(positionDistribution.cash_count ?? distribution.cash_count ?? 0),
+        },
+        outcome_distribution: {
+          win_count: Number(outcomeDistribution.win_count ?? distribution.win_count ?? 0),
+          loss_count: Number(outcomeDistribution.loss_count ?? distribution.loss_count ?? 0),
+          neutral_count: Number(outcomeDistribution.neutral_count ?? distribution.neutral_count ?? 0),
+        },
+        long_count: Number(distribution.long_count ?? positionDistribution.long_count ?? 0),
+        cash_count: Number(distribution.cash_count ?? positionDistribution.cash_count ?? 0),
+        win_count: Number(distribution.win_count ?? outcomeDistribution.win_count ?? 0),
+        loss_count: Number(distribution.loss_count ?? outcomeDistribution.loss_count ?? 0),
+        neutral_count: Number(distribution.neutral_count ?? outcomeDistribution.neutral_count ?? 0),
       },
     };
   }
@@ -611,12 +1113,12 @@ export class BacktestService {
   async compareWindows(input: {
     code?: string;
     evalWindowDaysList: number[];
+    strategyCodes?: string[];
     requester: { userId: number; includeAll: boolean };
   }): Promise<Record<string, unknown>> {
     const normalizedCode = String(input.code ?? '').trim();
     const scope: 'overall' | 'stock' = normalizedCode ? 'stock' : 'overall';
-    const lookupCode = this.resolveScopeCode(scope, normalizedCode);
-    const engineVersion = String(process.env.BACKTEST_ENGINE_VERSION ?? 'v1');
+    const neutralBandPct = Math.abs(Number(process.env.BACKTEST_NEUTRAL_BAND_PCT ?? 2.0));
     const windows = Array.from(
       new Set(
         input.evalWindowDaysList
@@ -624,8 +1126,9 @@ export class BacktestService {
           .filter((item) => Number.isFinite(item) && item > 0 && item <= 120),
       ),
     ).sort((a, b) => a - b);
+    const strategyCodes = this.normalizeCompareStrategyCodes(input.strategyCodes);
 
-    const items: Array<Record<string, unknown>> = [];
+    const rowsByWindow: Record<string, Array<Record<string, unknown>>> = {};
     for (const evalWindowDays of windows) {
       const where = this.buildScopeWhere({
         scope,
@@ -634,45 +1137,342 @@ export class BacktestService {
         requester: input.requester,
       });
 
-      const rows = await this.prisma.backtestResult.findMany({ where });
-      if (rows.length === 0) {
-        items.push({
-          eval_window_days: evalWindowDays,
-          total_evaluations: 0,
-          completed_count: 0,
-          direction_accuracy_pct: null,
-          win_rate_pct: null,
-          avg_simulated_return_pct: null,
-          avg_stock_return_pct: null,
-          max_drawdown_pct: null,
-          data_source: 'api',
-        });
-        continue;
-      }
-
-      const summary = BacktestEngine.computeSummary({
-        results: rows,
-        scope,
-        code: lookupCode,
-        evalWindowDays,
-        engineVersion,
+      const rows = await this.prisma.backtestResult.findMany({
+        where,
+        select: {
+          analysisHistoryId: true,
+          code: true,
+          analysisDate: true,
+          evaluatedAt: true,
+          simulatedReturnPct: true,
+          stockReturnPct: true,
+          evalStatus: true,
+          positionRecommendation: true,
+          operationAdvice: true,
+          stopLoss: true,
+          takeProfit: true,
+        },
       });
-      const curves = this.buildCurves(rows);
 
-      items.push({
-        eval_window_days: evalWindowDays,
-        total_evaluations: Number(summary.totalEvaluations ?? 0),
-        completed_count: Number(summary.completedCount ?? 0),
-        direction_accuracy_pct: (summary.directionAccuracyPct as number | null) ?? null,
-        win_rate_pct: (summary.winRatePct as number | null) ?? null,
-        avg_simulated_return_pct: (summary.avgSimulatedReturnPct as number | null) ?? null,
-        avg_stock_return_pct: (summary.avgStockReturnPct as number | null) ?? null,
-        max_drawdown_pct: this.maxDrawdown(curves),
-        data_source: 'api',
-      });
+      rowsByWindow[String(evalWindowDays)] = rows.map((row) => ({
+        analysis_history_id: row.analysisHistoryId,
+        code: row.code,
+        analysis_date: row.analysisDate?.toISOString().slice(0, 10) ?? null,
+        evaluated_at: row.evaluatedAt.toISOString(),
+        simulated_return_pct: row.simulatedReturnPct,
+        stock_return_pct: row.stockReturnPct,
+        eval_status: row.evalStatus,
+        position_recommendation: row.positionRecommendation,
+        operation_advice: row.operationAdvice,
+        stop_loss: row.stopLoss,
+        take_profit: row.takeProfit,
+      }));
     }
 
-    return { items };
+    const payload = await this.backtestAgentClient.compare({
+      eval_window_days_list: windows,
+      strategy_codes: strategyCodes,
+      neutral_band_pct: neutralBandPct,
+      rows_by_window: rowsByWindow,
+    });
+
+    const items = asArrayOfRecords(payload.items).map((item) => ({
+      ...item,
+      strategy_name:
+        typeof item.strategy_name === 'string'
+          ? item.strategy_name
+          : BACKTEST_COMPARE_STRATEGY_NAMES[String(item.strategy_code) as BacktestCompareStrategyCode] ?? String(item.strategy_code ?? ''),
+    }));
+
+    return {
+      metric_definition_version: String(payload.metric_definition_version ?? 'v2'),
+      items,
+    };
+  }
+
+  private async loadStrategyRunGroupDetail(
+    runGroupId: number,
+    requester: { userId: number; includeAll: boolean },
+  ): Promise<Record<string, unknown> | null> {
+    const row = await this.prisma.strategyBacktestRunGroup.findFirst({
+      where: {
+        id: runGroupId,
+        ...(requester.includeAll ? {} : { ownerUserId: requester.userId }),
+      },
+      include: {
+        runs: {
+          orderBy: [{ strategyCode: 'asc' }, { id: 'asc' }],
+          include: {
+            trades: {
+              orderBy: [{ entryDate: 'asc' }, { id: 'asc' }],
+            },
+            equityPoints: {
+              orderBy: [{ tradeDate: 'asc' }, { id: 'asc' }],
+            },
+          },
+        },
+      },
+    });
+    if (!row) {
+      return null;
+    }
+
+    return {
+      run_group_id: row.id,
+      code: row.code,
+      engine_version: row.engineVersion,
+      requested_range: {
+        start_date: this.toIsoDay(row.startDate),
+        end_date: this.toIsoDay(row.endDate),
+      },
+      effective_range: {
+        start_date: this.toIsoDay(row.effectiveStartDate),
+        end_date: this.toIsoDay(row.effectiveEndDate),
+      },
+      created_at: row.createdAt.toISOString(),
+      items: row.runs.map((run) => ({
+        run_id: run.id,
+        strategy_code: run.strategyCode,
+        strategy_name:
+          BACKTEST_STRATEGY_NAMES[run.strategyCode as BacktestStrategyCode] ?? String(run.strategyCode),
+        strategy_version: run.strategyVersion,
+        params: run.paramsJson ?? {},
+        metrics: run.metricsJson ?? {},
+        benchmark: run.benchmarkJson ?? {},
+        trades: run.trades.map((trade) => ({
+          entry_date: this.toIsoDay(trade.entryDate),
+          exit_date: this.toIsoDay(trade.exitDate),
+          entry_price: trade.entryPrice,
+          exit_price: trade.exitPrice,
+          qty: trade.qty,
+          gross_return_pct: trade.grossReturnPct,
+          net_return_pct: trade.netReturnPct,
+          fees: trade.fees,
+          exit_reason: trade.exitReason,
+        })),
+        equity: run.equityPoints.map((point) => ({
+          trade_date: this.toIsoDay(point.tradeDate),
+          equity: point.equity,
+          drawdown_pct: point.drawdownPct,
+          benchmark_equity: point.benchmarkEquity,
+        })),
+      })),
+      legacy_event_backtest: false,
+    };
+  }
+
+  async runStrategyRange(input: {
+    code: string;
+    startDate: string;
+    endDate: string;
+    strategyCodes?: string[];
+    initialCapital?: number;
+    commissionRate?: number;
+    slippageBps?: number;
+    requester: { userId: number; includeAll: boolean };
+  }): Promise<Record<string, unknown>> {
+    const code = String(input.code ?? '').trim();
+    if (!code) {
+      throw new Error('code is required');
+    }
+
+    const startDate = this.parseDayText(input.startDate);
+    const endDate = this.parseDayText(input.endDate);
+    if (!startDate || !endDate) {
+      throw new Error('start_date and end_date are required');
+    }
+    if (startDate.getTime() > endDate.getTime()) {
+      throw new Error('start_date must be <= end_date');
+    }
+
+    const strategyCodes = this.normalizeStrategyCodes(input.strategyCodes);
+    const initialCapital = this.toNumber(input.initialCapital);
+    const commissionRate = this.toNumber(input.commissionRate);
+    const slippageBps = this.toNumber(input.slippageBps);
+
+    const payload = await this.backtestAgentClient.strategyRun({
+      code,
+      start_date: this.toIsoDay(startDate),
+      end_date: this.toIsoDay(endDate),
+      strategy_codes: strategyCodes,
+      ...(initialCapital != null ? { initial_capital: initialCapital } : {}),
+      ...(commissionRate != null ? { commission_rate: commissionRate } : {}),
+      ...(slippageBps != null ? { slippage_bps: slippageBps } : {}),
+    });
+
+    const requestedRange = asRecord(payload.requested_range);
+    const effectiveRange = asRecord(payload.effective_range);
+    const items = asArrayOfRecords(payload.items);
+    if (items.length === 0) {
+      throw new Error('strategy backtest returned empty items');
+    }
+    const engineVersion = String(payload.engine_version ?? 'backtrader_v1');
+
+    const runGroupId = await this.prisma.$transaction(async (tx) => {
+      const group = await tx.strategyBacktestRunGroup.create({
+        data: {
+          ownerUserId: input.requester.userId,
+          code,
+          startDate: this.parseDayText(requestedRange.start_date ?? this.toIsoDay(startDate)) ?? startDate,
+          endDate: this.parseDayText(requestedRange.end_date ?? this.toIsoDay(endDate)) ?? endDate,
+          effectiveStartDate: this.parseDayText(effectiveRange.start_date),
+          effectiveEndDate: this.parseDayText(effectiveRange.end_date),
+          engineVersion,
+        },
+      });
+
+      for (const item of items) {
+        const strategyCodeRaw = String(item.strategy_code ?? '').trim();
+        const strategyCode = this.isStrategyCode(strategyCodeRaw) ? strategyCodeRaw : null;
+        if (!strategyCode) {
+          continue;
+        }
+        const run = await tx.strategyBacktestRun.create({
+          data: {
+            runGroupId: group.id,
+            strategyCode,
+            strategyVersion: String(item.strategy_version ?? 'v1'),
+            paramsJson: toPrismaJson(asRecord(item.params)),
+            metricsJson: toPrismaJson(asRecord(item.metrics)),
+            benchmarkJson: toPrismaJson(asRecord(item.benchmark)),
+          },
+        });
+
+        const trades = asArrayOfRecords(item.trades);
+        if (trades.length > 0) {
+          await tx.strategyBacktestTrade.createMany({
+            data: trades.map((trade) => ({
+              runId: run.id,
+              entryDate: this.parseDayText(trade.entry_date),
+              exitDate: this.parseDayText(trade.exit_date),
+              entryPrice: this.toNumber(trade.entry_price),
+              exitPrice: this.toNumber(trade.exit_price),
+              qty: this.toNumber(trade.qty) != null ? Math.trunc(Number(trade.qty)) : null,
+              grossReturnPct: this.toNumber(trade.gross_return_pct),
+              netReturnPct: this.toNumber(trade.net_return_pct),
+              fees: this.toNumber(trade.fees),
+              exitReason: String(trade.exit_reason ?? ''),
+            })),
+          });
+        }
+
+        const equity = asArrayOfRecords(item.equity);
+        if (equity.length > 0) {
+          await tx.strategyBacktestEquityPoint.createMany({
+            data: equity
+              .map((point) => ({
+                runId: run.id,
+                tradeDate: this.parseDayText(point.trade_date),
+                equity: this.toNumber(point.equity),
+                drawdownPct: this.toNumber(point.drawdown_pct),
+                benchmarkEquity: this.toNumber(point.benchmark_equity),
+              }))
+              .filter((point) => point.tradeDate != null && point.equity != null)
+              .map((point) => ({
+                runId: point.runId,
+                tradeDate: point.tradeDate as Date,
+                equity: point.equity as number,
+                drawdownPct: point.drawdownPct,
+                benchmarkEquity: point.benchmarkEquity,
+              })),
+          });
+        }
+      }
+
+      return group.id;
+    });
+
+    const detail = await this.loadStrategyRunGroupDetail(runGroupId, input.requester);
+    if (!detail) {
+      throw new Error('strategy backtest run not found after persistence');
+    }
+    return detail;
+  }
+
+  async listStrategyRuns(input: {
+    code?: string;
+    strategyCode?: string;
+    startDate?: string;
+    endDate?: string;
+    page: number;
+    limit: number;
+    requester: { userId: number; includeAll: boolean };
+  }): Promise<Record<string, unknown>> {
+    const parsedStart = input.startDate ? this.parseDayText(input.startDate) : null;
+    const parsedEnd = input.endDate ? this.parseDayText(input.endDate) : null;
+    const strategyCode = String(input.strategyCode ?? '').trim();
+    const code = String(input.code ?? '').trim();
+
+    const where: Prisma.StrategyBacktestRunGroupWhereInput = {
+      ...(input.requester.includeAll ? {} : { ownerUserId: input.requester.userId }),
+      ...(code ? { code } : {}),
+      ...(parsedStart ? { endDate: { gte: parsedStart } } : {}),
+      ...(parsedEnd ? { startDate: { lte: parsedEnd } } : {}),
+      ...(this.isStrategyCode(strategyCode)
+        ? {
+            runs: {
+              some: {
+                strategyCode,
+              },
+            },
+          }
+        : {}),
+    };
+
+    const total = await this.prisma.strategyBacktestRunGroup.count({ where });
+    const rows = await this.prisma.strategyBacktestRunGroup.findMany({
+      where,
+      include: {
+        runs: {
+          orderBy: [{ strategyCode: 'asc' }, { id: 'asc' }],
+          select: {
+            id: true,
+            strategyCode: true,
+            strategyVersion: true,
+            metricsJson: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      skip: (input.page - 1) * input.limit,
+      take: input.limit,
+    });
+
+    return {
+      total,
+      page: input.page,
+      limit: input.limit,
+      items: rows.map((row) => ({
+        run_group_id: row.id,
+        code: row.code,
+        engine_version: row.engineVersion,
+        requested_range: {
+          start_date: this.toIsoDay(row.startDate),
+          end_date: this.toIsoDay(row.endDate),
+        },
+        effective_range: {
+          start_date: this.toIsoDay(row.effectiveStartDate),
+          end_date: this.toIsoDay(row.effectiveEndDate),
+        },
+        created_at: row.createdAt.toISOString(),
+        strategies: row.runs.map((run) => ({
+          run_id: run.id,
+          strategy_code: run.strategyCode,
+          strategy_name:
+            BACKTEST_STRATEGY_NAMES[run.strategyCode as BacktestStrategyCode] ?? String(run.strategyCode),
+          strategy_version: run.strategyVersion,
+          metrics: run.metricsJson ?? {},
+        })),
+      })),
+      legacy_event_backtest: false,
+    };
+  }
+
+  async getStrategyRunDetail(input: {
+    runGroupId: number;
+    requester: { userId: number; includeAll: boolean };
+  }): Promise<Record<string, unknown> | null> {
+    return await this.loadStrategyRunGroupDetail(input.runGroupId, input.requester);
   }
 
   async getSummary(
@@ -692,43 +1492,30 @@ export class BacktestService {
           evalWindowDays: includeAllEvalWindowDays,
           ...(scope === 'stock' ? { code: lookupCode } : {}),
         },
+        select: {
+          evalStatus: true,
+          positionRecommendation: true,
+          outcome: true,
+          directionCorrect: true,
+          stockReturnPct: true,
+          simulatedReturnPct: true,
+          hitStopLoss: true,
+          hitTakeProfit: true,
+          firstHit: true,
+          firstHitTradingDays: true,
+          operationAdvice: true,
+        },
       });
       if (rows.length === 0) {
         return null;
       }
 
-      const summary = BacktestEngine.computeSummary({
-        results: rows,
+      return await this.computeSummaryViaAgent({
         scope,
         code: lookupCode,
         evalWindowDays: includeAllEvalWindowDays,
         engineVersion,
-      });
-
-      return this.mapSummary({
-        scope: String(summary.scope),
-        code: String(summary.code),
-        evalWindowDays: Number(summary.evalWindowDays),
-        engineVersion: String(summary.engineVersion),
-        totalEvaluations: Number(summary.totalEvaluations ?? 0),
-        completedCount: Number(summary.completedCount ?? 0),
-        insufficientCount: Number(summary.insufficientCount ?? 0),
-        longCount: Number(summary.longCount ?? 0),
-        cashCount: Number(summary.cashCount ?? 0),
-        winCount: Number(summary.winCount ?? 0),
-        lossCount: Number(summary.lossCount ?? 0),
-        neutralCount: Number(summary.neutralCount ?? 0),
-        directionAccuracyPct: (summary.directionAccuracyPct as number | null) ?? null,
-        winRatePct: (summary.winRatePct as number | null) ?? null,
-        neutralRatePct: (summary.neutralRatePct as number | null) ?? null,
-        avgStockReturnPct: (summary.avgStockReturnPct as number | null) ?? null,
-        avgSimulatedReturnPct: (summary.avgSimulatedReturnPct as number | null) ?? null,
-        stopLossTriggerRate: (summary.stopLossTriggerRate as number | null) ?? null,
-        takeProfitTriggerRate: (summary.takeProfitTriggerRate as number | null) ?? null,
-        ambiguousRate: (summary.ambiguousRate as number | null) ?? null,
-        avgDaysToFirstHit: (summary.avgDaysToFirstHit as number | null) ?? null,
-        adviceBreakdown: summary.adviceBreakdown,
-        diagnostics: summary.diagnostics,
+        rows,
       });
     }
 
@@ -738,12 +1525,13 @@ export class BacktestService {
         scope,
         code: lookupCode,
         engineVersion,
-        ...(evalWindowDays != null ? { evalWindowDays } : {}),
+        evalWindowDays: includeAllEvalWindowDays,
       },
       orderBy: { computedAt: 'desc' },
     });
 
     if (!row) return null;
+    const rowRecord = row as unknown as Record<string, unknown>;
 
     return this.mapSummary({
       scope: row.scope,
@@ -760,6 +1548,8 @@ export class BacktestService {
       lossCount: row.lossCount,
       neutralCount: row.neutralCount,
       directionAccuracyPct: row.directionAccuracyPct,
+      predictionWinRatePct: this.toNumber(rowRecord.predictionWinRatePct ?? row.winRatePct),
+      tradeWinRatePct: this.toNumber(rowRecord.tradeWinRatePct ?? row.winRatePct),
       winRatePct: row.winRatePct,
       neutralRatePct: row.neutralRatePct,
       avgStockReturnPct: row.avgStockReturnPct,

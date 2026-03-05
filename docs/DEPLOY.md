@@ -1,55 +1,98 @@
-# Deploy
+# Deploy (Backtrader Local)
 
-1. Configure `.env` (or copy from `.env.example`).
-   - If `ADMIN_AUTH_ENABLED=true` and this is a fresh database, configure `ADMIN_INIT_USERNAME` and `ADMIN_INIT_PASSWORD`.
-   - If you need self register, keep `ADMIN_SELF_REGISTER_ENABLED=true` (default true).
-   - Configure `PERSONAL_SECRET_KEY` (32-byte hex/base64) to enable encrypted user AI token storage.
-   - Configure `BROKER_SECRET_KEY` (32-byte hex/base64) to enable encrypted broker credential storage.
-   - Configure Broker Gateway endpoint:
-     - `BROKER_GATEWAY_BASE_URL` (e.g. `http://127.0.0.1:8010`)
-     - `BROKER_GATEWAY_TIMEOUT_MS` (default `15000`)
-     - `BROKER_SNAPSHOT_CACHE_TTL_MS` (default `60000`)
-   - Keep `AGENT_FORWARD_RUNTIME_CONFIG=false` unless Agent service already supports runtime config payload.
-   - If you enable `AGENT_FORWARD_RUNTIME_CONFIG=true`, ensure `PERSONAL_SECRET_KEY` is valid so user token can be decrypted for Agent forwarding.
-   - For broker tasks, Backend force-forwards runtime config regardless of `AGENT_FORWARD_RUNTIME_CONFIG`.
-   - Keep `AGENT_REQUEST_TIMEOUT_MS` in a short range (recommended `15000~30000`) for single HTTP calls.
-   - Use async bridge polling vars for long tasks:
-     - `AGENT_TASK_POLL_INTERVAL_MS=2000`
-     - `AGENT_TASK_POLL_TIMEOUT_MS=600000`
-     - `AGENT_TASK_POLL_MAX_RETRIES=3`
-     - `AGENT_TASK_RETRY_BASE_DELAY_MS=1000`
-     - `AGENT_CREDENTIAL_TICKET_TTL_SEC=900`
-     - `AGENT_CREDENTIAL_TICKET_MAX_TTL_SEC=3600`
-2. Install dependencies: `pnpm install`.
-3. Prepare PostgreSQL and schema: `pnpm db:init` (dev) or `pnpm prisma:deploy && pnpm db:constraints` (prod).
-4. Build: `pnpm build`.
-5. Start API: `pnpm start:api`.
-6. Start worker: `pnpm start:worker`.
+## 1. 环境准备
 
-Notes:
+1. 复制并配置环境变量：
 
-- Dev default `DATABASE_URL` follows Homebrew local no-password mode: `postgresql://<macOS-user>@localhost:5432/backend_stock?schema=public`.
-- Keep `AGENT_BASE_URL` pointing to `Agent_stock` service.
-- Backend analysis worker now uses async bridge (`/api/v1/runs` async + `/api/v1/tasks/:id` poll + `/api/v1/runs/:id` fetch) to avoid false-failure caused by long sync requests.
-- Frontend integration in real-data mode should use `VITE_DATA_MODE=api` (in Frontend_stock env).
-- New broker/account endpoints in Backend:
-  - `GET|POST|PUT|DELETE /api/v1/users/me/broker-accounts`
-  - `POST /api/v1/users/me/broker-accounts/:id/verify`
-  - `GET /api/v1/users/me/trading/account-summary|positions|orders|trades|performance`
-- Internal Agent bridge endpoints (service token auth):
-  - `POST /api/v1/internal/agent/credential-tickets`
-  - `POST /api/v1/internal/agent/credential-tickets/exchange`
-  - `POST /api/v1/internal/agent/execution-events`
-- Analysis API supports optional execution planning fields:
-  - `execution_mode=auto|paper|broker` (default `auto`)
-  - `broker_account_id` (optional)
-- If broker execution is requested but Agent returns paper/fallback, Backend marks task failed with `broker_execution_degraded`.
-- Current Agent implementation may still fall back to paper when broker order contract is disabled.
-- Reserved API mappings now exist in Backend:
-  - `/api/v1/stocks/:stock_code/indicators`
-  - `/api/v1/stocks/:stock_code/factors`
-  - `/api/v1/backtest/curves`
-  - `/api/v1/backtest/distribution`
-  - `/api/v1/backtest/compare`
-  - `/api/v1/analysis/tasks/:task_id/stages`
-  - `/api/v1/analysis/tasks/:task_id/stages/stream`
+```bash
+cp .env.example .env
+```
+
+2. 关键变量检查：
+
+- `DATABASE_URL`
+- `AGENT_BASE_URL`
+- `AGENT_SERVICE_AUTH_TOKEN`
+- `BACKTRADER_AGENT_BASE_URL`
+- `BACKTRADER_AGENT_TOKEN`
+- `BACKTRADER_AGENT_TIMEOUT_MS`
+- `SIMULATION_BIND_BROKER_CODE=backtrader_local`
+- `SIM_PROVIDER_DEFAULT_CODE=backtrader_local`
+- `BROKER_SECRET_KEY`
+- `ANALYSIS_AUTO_ORDER_*`（风控参数）
+
+3. 若启用后台登录鉴权：
+
+- `ADMIN_AUTH_ENABLED=true`
+- `ADMIN_INIT_USERNAME`
+- `ADMIN_INIT_PASSWORD`
+
+## 2. 安装与数据库
+
+```bash
+pnpm install
+pnpm db:init
+```
+
+生产环境（新库）推荐：
+
+```bash
+pnpm prisma:deploy
+pnpm db:constraints
+```
+
+如果是历史库（此前通过 `db push` 初始化，尚未接入 migrate history），先确保 schema 对齐：
+
+```bash
+pnpm db:push
+pnpm prisma:generate
+```
+
+然后可将 baseline 标记为已应用（一次性）：
+
+```bash
+pnpm exec prisma migrate resolve --applied 20260305074500_baseline
+```
+
+## 3. 构建与启动
+
+开发模式（推荐，API+Worker 同进程）：
+
+```bash
+pnpm start:dev:all
+```
+
+生产模式：
+
+```bash
+pnpm build
+pnpm start:api
+pnpm start:worker
+```
+
+## 4. 健康检查
+
+- `GET /api/health`
+- `GET /api/health/live`
+- `GET /api/health/ready`
+
+`/api/health/ready` 返回中包含 `backtest_storage_ready`。  
+若策略回测持久化表缺失，后端在启动阶段会直接失败并给出：
+
+- `strategy backtest tables missing; run db migration`
+
+## 5. 关键业务校验
+
+- `GET /api/v1/users/me/simulation-account/status`
+  - 应包含 `engine=backtrader`、`provider_code=backtrader_local`
+- `POST /api/v1/users/me/simulation-account/bind`
+  - 仅本地初始化语义
+- `GET /api/v1/users/me/trading/*`
+  - 返回通道应为 `order_channel=backtrader_local`
+
+## 6. 兼容性说明
+
+以下接口已下线：
+
+- `/api/v1/users/me/broker-accounts/*`
+- `/api/v1/internal/agent/*`

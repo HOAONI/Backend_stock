@@ -7,7 +7,6 @@ import { PrismaModule } from './common/database/prisma.module';
 import { AuthGuardMiddleware } from './common/auth/auth-guard.middleware';
 import { AuditLogMiddleware } from './common/auth/audit-log.middleware';
 import { WorkerModule } from './common/worker/worker.module';
-import { AgentBridgeModule } from './modules/agent-bridge/agent-bridge.module';
 import { AnalysisModule } from './modules/analysis/analysis.module';
 import { AdminLogsModule } from './modules/admin-logs/admin-logs.module';
 import { AdminRolesModule } from './modules/admin-roles/admin-roles.module';
@@ -33,7 +32,6 @@ import { UserSettingsModule } from './modules/user-settings/user-settings.module
     AuthModule,
     BrokerAccountsModule,
     TradingAccountModule,
-    AgentBridgeModule,
     SystemConfigModule,
     AnalysisModule,
     HistoryModule,

@@ -38,7 +38,6 @@ export class AnalysisController {
             forceRefresh: normalized.forceRefresh,
             userId: scope.userId,
             executionMode: normalized.executionMode,
-            brokerAccountId: normalized.brokerAccountId,
           });
           res.status(202).json(task);
           return;
@@ -62,13 +61,18 @@ export class AnalysisController {
         reportType: normalized.reportType,
         userId: scope.userId,
         executionMode: normalized.executionMode,
-        brokerAccountId: normalized.brokerAccountId,
       });
       res.status(200).json(result);
     } catch (error: unknown) {
       const err = error as Error & { code?: string };
       if (err.code === 'VALIDATION_ERROR') {
         throw new HttpException({ error: 'validation_error', message: err.message }, HttpStatus.BAD_REQUEST);
+      }
+      if (err.code === 'SIMULATION_ACCOUNT_REQUIRED') {
+        throw new HttpException(
+          { error: 'simulation_account_required', message: err.message },
+          HttpStatus.PRECONDITION_FAILED,
+        );
       }
 
       throw new HttpException(

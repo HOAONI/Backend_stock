@@ -1,50 +1,32 @@
 import { Type } from 'class-transformer';
-import { IsIn, IsInt, IsObject, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsNotEmptyObject, IsNumber, IsObject, IsOptional, IsString, Min } from 'class-validator';
 
-export class ListBrokerAccountsQueryDto {
+export class BindSimulationAccountDto {
+  @IsOptional()
+  @IsString()
+  account_uid?: string;
+
+  @IsOptional()
+  @IsString()
+  account_display_name?: string;
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  initial_capital!: number;
+
   @IsOptional()
   @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  @Max(200)
-  limit = 50;
-}
-
-export class CreateBrokerAccountDto {
-  @IsString()
-  broker_code!: string;
+  @Min(0)
+  commission_rate?: number;
 
   @IsOptional()
-  @IsIn(['paper', 'simulation'])
-  environment: 'paper' | 'simulation' = 'paper';
-
-  @IsString()
-  account_uid!: string;
-
-  @IsOptional()
-  @IsString()
-  account_display_name?: string;
-
-  @IsObject()
-  credentials!: Record<string, unknown>;
-}
-
-export class UpdateBrokerAccountDto {
-  @IsOptional()
-  @IsString()
-  account_display_name?: string;
-
-  @IsOptional()
-  @IsIn(['active', 'disabled'])
-  status?: 'active' | 'disabled';
+  @Type(() => Number)
+  @Min(0)
+  slippage_bps?: number;
 
   @IsOptional()
   @IsObject()
+  @IsNotEmptyObject()
   credentials?: Record<string, unknown>;
-}
-
-export class VerifyBrokerAccountDto {
-  @IsOptional()
-  @Type(() => Boolean)
-  refresh = true;
 }

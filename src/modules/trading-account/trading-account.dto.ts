@@ -1,13 +1,7 @@
 import { Type } from 'class-transformer';
-import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 
 export class TradingAccountQueryDto {
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  broker_account_id?: number;
-
   @IsOptional()
   @Type(() => Boolean)
   @IsBoolean()
@@ -15,10 +9,6 @@ export class TradingAccountQueryDto {
 }
 
 export class PlaceOrderDto {
-  @IsInt()
-  @Min(1)
-  broker_account_id!: number;
-
   @IsString()
   stock_code!: string;
 
@@ -39,13 +29,29 @@ export class PlaceOrderDto {
   @IsNumber()
   @Min(1)
   quantity!: number;
+
+  @IsOptional()
+  @IsString()
+  idempotency_key?: string;
 }
 
 export class CancelOrderDto {
-  @IsInt()
-  @Min(1)
-  broker_account_id!: number;
-
   @IsString()
   order_id!: string;
+
+  @IsOptional()
+  @IsString()
+  idempotency_key?: string;
+}
+
+export class AddFundsDto {
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  amount!: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  note?: string;
 }

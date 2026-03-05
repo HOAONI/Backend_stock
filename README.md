@@ -1,83 +1,101 @@
 # Backend_stock
 
-Standalone backend service extracted from `daily_stock_analysis`.
+`Backend_stock` 是本系统的主后端服务，负责：
 
-## Stack
+- 系统登录与 RBAC
+- 分析任务提交与异步轮询
+- Backtrader 本地模拟盘账户初始化/状态
+- 交易查询与下单/撤单
+- 自动下单（`execution_mode=auto`）
+
+## 技术栈
 
 - Node.js 22+
 - NestJS
 - Prisma + PostgreSQL
 - pnpm
 
-## Quick Start
+## 快速启动
 
 ```bash
 cp .env.example .env
 pnpm install
 pnpm db:init
-pnpm start:dev
+pnpm start:dev:all
 ```
 
-If you enable admin auth (`ADMIN_AUTH_ENABLED=true`) and the database has no admin users yet, set at least:
+`start:dev:all` 会在同一进程启 API + Worker。
+
+若数据库是已存在实例且未跑 `db:init`，至少先执行一次：
 
 ```bash
-ADMIN_INIT_USERNAME=admin
-ADMIN_INIT_PASSWORD=your_strong_password
+pnpm db:push
+pnpm prisma:generate
 ```
 
-Optional auth/user settings env:
+## 核心环境变量
 
 ```bash
-ADMIN_SELF_REGISTER_ENABLED=true
-PERSONAL_SECRET_KEY=<32-byte key in hex/base64>
-AGENT_FORWARD_RUNTIME_CONFIG=false
-BROKER_SECRET_KEY=<32-byte key in hex/base64>
-BROKER_GATEWAY_BASE_URL=http://127.0.0.1:8010
-BROKER_SNAPSHOT_CACHE_TTL_MS=60000
-# Agent async bridge polling (avoid long sync call timeout false-fail)
+# Agent service
+AGENT_BASE_URL=http://127.0.0.1:8001
+AGENT_SERVICE_AUTH_TOKEN=change_me
 AGENT_REQUEST_TIMEOUT_MS=30000
+
+# Agent task polling
 AGENT_TASK_POLL_INTERVAL_MS=2000
 AGENT_TASK_POLL_TIMEOUT_MS=600000
 AGENT_TASK_POLL_MAX_RETRIES=3
 AGENT_TASK_RETRY_BASE_DELAY_MS=1000
-AGENT_CREDENTIAL_TICKET_TTL_SEC=900
-AGENT_CREDENTIAL_TICKET_MAX_TTL_SEC=3600
+
+# Backtrader adapter (Backend -> Agent internal)
+BACKTRADER_AGENT_BASE_URL=http://127.0.0.1:8001
+BACKTRADER_AGENT_TOKEN=change_me
+BACKTRADER_AGENT_TIMEOUT_MS=20000
+BACKTRADER_DEFAULT_COMMISSION=0.0003
+BACKTRADER_DEFAULT_SLIPPAGE_BPS=2
+
+# Backtest adapter (Backend -> Agent internal)
+BACKTEST_AGENT_BASE_URL=http://127.0.0.1:8001
+BACKTEST_AGENT_TOKEN=change_me
+BACKTEST_AGENT_TIMEOUT_MS=30000
+
+# Simulation account defaults
+SIMULATION_BIND_BROKER_CODE=backtrader_local
+SIM_PROVIDER_DEFAULT_CODE=backtrader_local
+BROKER_SNAPSHOT_CACHE_TTL_MS=60000
+BROKER_SECRET_KEY=
+
+# Auto order risk controls
+ANALYSIS_AUTO_ORDER_ENABLED=true
+ANALYSIS_AUTO_ORDER_TYPE=market
+ANALYSIS_AUTO_ORDER_A_SHARE_ONLY=true
+ANALYSIS_AUTO_ORDER_MAX_NOTIONAL=200000
+ANALYSIS_AUTO_ORDER_MAX_QTY=20000
+ANALYSIS_AUTO_ORDER_ENFORCE_SESSION=true
+ANALYSIS_AUTO_ORDER_TIMEZONE=Asia/Shanghai
+ANALYSIS_AUTO_ORDER_TRADING_SESSIONS=09:30-11:30,13:00-15:00
+
+# Auth
+ADMIN_AUTH_ENABLED=false
+ADMIN_SELF_REGISTER_ENABLED=true
+ADMIN_SESSION_MAX_AGE_HOURS=24
+ADMIN_SESSION_SECRET=
+ADMIN_INIT_USERNAME=admin
+ADMIN_INIT_PASSWORD=
 ```
 
-Single-process mode (API + Worker in one command):
+## API 基础信息
 
-```bash
-pnpm start:dev:all
-```
-
-Start worker in another terminal:
-
-```bash
-pnpm start:worker:dev
-```
-
-`RUN_WORKER_IN_API=true` enables embedded worker mode. Default is `false`.
-
-Production-style start:
-
-```bash
-pnpm build
-pnpm start:api
-pnpm start:worker
-```
-
-## API Base
-
-- `http://127.0.0.1:8002`
+- Base: `http://127.0.0.1:8002`
 - Health: `GET /api/health`
-- OpenAPI JSON: `GET /openapi.json`
-- Swagger UI: `GET /docs`
+- OpenAPI: `GET /openapi.json`
+- Swagger: `GET /docs`
 
-## Main Compatibility Endpoints
+## 主要接口
 
 - `/api/v1/auth/*`
 - `/api/v1/users/me/settings`
-- `/api/v1/users/me/broker-accounts/*`
+- `/api/v1/users/me/simulation-account/status|bind`
 - `/api/v1/users/me/trading/*`
 - `/api/v1/analysis/*`
 - `/api/v1/history*`
@@ -87,110 +105,58 @@ pnpm start:worker
 - `/api/v1/admin/users/*`
 - `/api/v1/admin/roles/*`
 - `/api/v1/admin/logs/*`
-- `/api/v1/internal/agent/*` (service token auth)
 
-Additional real-data endpoints (for Frontend_stock reserved APIs):
+说明：`/api/v1/users/me/broker-accounts/*` 与 `/api/v1/internal/agent/*` 已下线。
 
-- `GET /api/v1/stocks/:stock_code/indicators`
-- `GET /api/v1/stocks/:stock_code/factors`
-- `GET /api/v1/backtest/curves`
-- `GET /api/v1/backtest/distribution`
-- `POST /api/v1/backtest/compare`
-- `GET /api/v1/analysis/tasks/:task_id/stages`
-- `GET /api/v1/analysis/tasks/:task_id/stages/stream` (SSE)
+`/api/v1/backtest/*` 仍由 Backend 对外提供，但回测计算由 Agent 内部接口执行，Backend 负责鉴权、数据落库与返回兼容字段。
 
-## Auth & RBAC
+## 启动前检查
 
-- Login request body is now `username + password`.
-- Self-register endpoint: `POST /api/v1/auth/register` (default enabled, assign `analyst` role).
-- The system uses module-level RBAC:
-  - Modules: `analysis/history/stocks/backtest/system_config/user_settings/broker_account/trading_account/admin_user/admin_role/admin_log/auth`
-  - Roles: `super_admin`, `analyst`, `operator`
-- Audit logs are persisted for all `/api/v1/*` requests with masked request/response summaries.
-- Non-`super_admin` users can only view their own business data (analysis/history/backtest) and own audit logs.
+应用启动前会执行策略回测存储检查。若缺失以下表，服务将拒绝启动：
 
-## Agent Runtime Forwarding
+- `strategy_backtest_run_groups`
+- `strategy_backtest_runs`
+- `strategy_backtest_trades`
+- `strategy_backtest_equity_points`
 
-- `AGENT_FORWARD_RUNTIME_CONFIG=false` (default): Backend does not send user runtime config to Agent.
-- `AGENT_FORWARD_RUNTIME_CONFIG=true`: Backend forwards `runtime_config` to Agent and includes decrypted per-user `api_token` in-memory only when available.
-- Broker mode (`execution_mode=broker`) always forces runtime forwarding for that task, even when `AGENT_FORWARD_RUNTIME_CONFIG=false`.
-- `analysis_tasks.request_payload.runtime_config` always stores masked payload (no plaintext token).
+典型错误消息：
 
-## Agent Async Bridge (Task Stability)
+- `strategy backtest tables missing; run db migration`
 
-- Backend worker submits Agent run via async mode and polls `/api/v1/tasks/:task_id`, then fetches final run by `/api/v1/runs/:run_id`.
-- This avoids marking long-running tasks as failed due to single request timeout.
-- `analysis_tasks.result_payload.bridge_meta` includes:
-  - `agent_task_id`
-  - `agent_run_id`
-  - `poll_attempts`
-  - `last_agent_status`
-  - `bridge_error_code` (on failure)
-
-## Broker Account Binding (Backend-only)
-
-- Backend supports per-user broker account binding and encrypted credential storage.
-- Credentials are encrypted with `BROKER_SECRET_KEY` and never returned in plaintext.
-- Real account data APIs (summary/positions/orders/trades/performance) call Broker Gateway and use short cache.
-- Internal Agent bridge endpoints are prepared:
-  - `POST /api/v1/internal/agent/credential-tickets`
-  - `POST /api/v1/internal/agent/credential-tickets/exchange`
-  - `POST /api/v1/internal/agent/execution-events`
-- Internal endpoints require `Authorization: Bearer <AGENT_SERVICE_AUTH_TOKEN>`.
-- `POST /api/v1/analysis/analyze` now supports optional `execution_mode=auto|paper|broker` and `broker_account_id`.
-- `execution_mode=auto` strategy: has verified active broker account => broker; otherwise paper.
-- If a task expects broker execution but Agent returns paper/fallback (`executed_via!=broker` or `fallback_reason`), Backend marks task failed with `broker_execution_degraded`.
-- Current Agent repository still reports broker fallback when broker order contract is disabled; in that state broker tasks will fail by design (no false success).
-
-## Frontend Integration Hint
-
-- Set `Frontend_stock` `VITE_DATA_MODE=api` when you need full real-data path without mock/derived fallback.
-
-## SQLite Migration
+修复命令：
 
 ```bash
-pnpm migrate:sqlite
+pnpm db:push
+# 或（已启用 Prisma migrations 的环境）
+pnpm prisma:deploy
 ```
 
-This migrates core data from the legacy sqlite database into PostgreSQL.
+## Simulation 语义
 
-Core migrated tables:
+- `POST /api/v1/users/me/simulation-account/bind`
+  - 语义：初始化本地 Backtrader 模拟账户（非第三方登录）
+  - 入参：`initial_capital` 必填，`account_uid/account_display_name/commission_rate/slippage_bps` 可选
+- `GET /api/v1/users/me/simulation-account/status`
+  - 返回固定包含：`engine=backtrader`、`provider_code=backtrader_local`
 
-- `analysis_history`
-- `news_intel`
-- `backtest_results`
-- `backtest_summaries`
-- `analysis_tasks` (if present)
-- `system_config_items` (if present)
-- `system_config_revisions` (if present)
-- `auth_credentials` (if present)
-- `auth_sessions` (if present)
-- `auth_rate_limits` (if present)
+## 交易语义
 
-The script is re-runnable and checkpoint-based.
+- `GET /api/v1/users/me/trading/account-summary|positions|orders|trades|performance`
+- `POST /api/v1/users/me/trading/orders`
+- `POST /api/v1/users/me/trading/orders/cancel`
 
-## Supplemental SQL Constraints
+返回元信息固定为本地通道语义：`order_channel=backtrader_local`。
+
+## 分析执行语义
+
+- `execution_mode=paper`：只分析，不下单
+- `execution_mode=auto`：分析完成后由 Worker 自动提交本地模拟盘订单
+- 两种模式都要求模拟账户“已初始化且已校验”，否则返回 `412 simulation_account_required`
+
+## 数据清理脚本
 
 ```bash
-pnpm db:constraints
+pnpm cleanup:legacy-broker-data
 ```
 
-This applies PostgreSQL-native constraints not expressed by Prisma partial indexes (for example active task deduplication by `stock_code`).
-
-## Full Gap Validation
-
-```bash
-pnpm gap:validate
-```
-
-This runs:
-
-- Runtime contract comparison between legacy backend (`:8000`) and Backend_stock (`:8002`)
-- Agent_stock + Backend_stock integration flow validation (auth/analysis/task/history/backtest/stocks/system-config)
-- SQLite-to-PostgreSQL migration replay and reconciliation
-
-Generated reports:
-
-- `docs/CONTRACT_REPORT.md`
-- `docs/GAP_VALIDATION_REPORT.md`
-- `docs/MIGRATION_VERIFICATION_REPORT.md`
+用于清理历史 `gmtrade/cn_sim_gateway/simulation/futu` 账户及关联快照/票据/订单数据。

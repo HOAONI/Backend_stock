@@ -26,12 +26,14 @@
     "prisma:deploy": "prisma migrate deploy",
     "db:push": "prisma db push",
     "db:constraints": "tsx -r tsconfig-paths/register scripts/apply-postgres-constraints.ts",
+    "cleanup:legacy-broker-data": "tsx -r tsconfig-paths/register scripts/cleanup-legacy-broker-data.ts",
     "db:init": "bash scripts/db-init.sh",
     "migrate:sqlite": "tsx -r tsconfig-paths/register scripts/migrate-sqlite-to-postgres.ts",
     "contract:compare": "tsx -r tsconfig-paths/register scripts/compare-runtime-contract.ts",
     "validate:e2e:flows": "tsx -r tsconfig-paths/register scripts/validate-e2e-flows.ts",
     "verify:migration": "tsx -r tsconfig-paths/register scripts/verify-migration-counts.ts",
-    "gap:validate": "bash scripts/run-gap-validation.sh"
+    "gap:validate": "bash scripts/run-gap-validation.sh",
+    "backtest:recompute-all": "tsx -r tsconfig-paths/register scripts/backtest-recompute-all.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.11",

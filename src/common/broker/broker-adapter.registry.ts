@@ -1,21 +1,18 @@
 import { Injectable } from '@nestjs/common';
 
+import { BacktraderAgentAdapter } from './backtrader-agent.adapter';
 import { BrokerAdapter } from './broker.types';
-import { FutuGatewayAdapter } from './futu-gateway.adapter';
-import { SimulationAdapter } from './simulation.adapter';
 
 @Injectable()
 export class BrokerAdapterRegistry {
   private readonly adapters: Map<string, BrokerAdapter>;
 
-  constructor(
-    futuAdapter: FutuGatewayAdapter,
-    simulationAdapter: SimulationAdapter,
-  ) {
-    this.adapters = new Map<string, BrokerAdapter>([
-      [futuAdapter.brokerCode, futuAdapter],
-      [simulationAdapter.brokerCode, simulationAdapter],
+  constructor(backtraderAgentAdapter: BacktraderAgentAdapter) {
+    const adapters = new Map<string, BrokerAdapter>([
+      [backtraderAgentAdapter.brokerCode, backtraderAgentAdapter],
     ]);
+
+    this.adapters = adapters;
   }
 
   getSupportedBrokers(): string[] {

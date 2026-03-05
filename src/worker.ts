@@ -13,7 +13,7 @@ function setupEnv(): void {
   const envFile = process.env.ENV_FILE;
   const resolved = envFile ? path.resolve(envFile) : path.resolve(process.cwd(), '.env');
   if (fs.existsSync(resolved)) {
-    dotenv.config({ path: resolved });
+    dotenv.config({ path: resolved, override: true });
   }
 }
 

@@ -2,13 +2,20 @@ import { Global, Module } from '@nestjs/common';
 
 import { BrokerCryptoService } from '@/common/security/broker-crypto.service';
 
+import { BacktraderAgentAdapter } from './backtrader-agent.adapter';
 import { BrokerAdapterRegistry } from './broker-adapter.registry';
-import { BrokerGatewayClient } from './broker-gateway.client';
-import { FutuGatewayAdapter } from './futu-gateway.adapter';
 
 @Global()
 @Module({
-  providers: [BrokerCryptoService, BrokerGatewayClient, FutuGatewayAdapter, BrokerAdapterRegistry],
-  exports: [BrokerCryptoService, BrokerGatewayClient, FutuGatewayAdapter, BrokerAdapterRegistry],
+  providers: [
+    BrokerCryptoService,
+    BacktraderAgentAdapter,
+    BrokerAdapterRegistry,
+  ],
+  exports: [
+    BrokerCryptoService,
+    BacktraderAgentAdapter,
+    BrokerAdapterRegistry,
+  ],
 })
 export class BrokerModule {}
