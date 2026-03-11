@@ -70,6 +70,11 @@ pnpm start:api
 pnpm start:worker
 ```
 
+说明：
+
+- 根目录 `bash scripts/system/start.sh` 会在启动前按现有 `DATABASE_URL` 自动执行 schema 预处理，并兼容历史 `db push` 或未完成 migration 的本地库。
+- 直接运行 `pnpm start:all` / `pnpm start:dev:all` / `pnpm start:api` 时，仍需先手动完成 `pnpm prisma:deploy` 或 `pnpm db:push`。
+
 ## 4. 健康检查
 
 - `GET /api/health`

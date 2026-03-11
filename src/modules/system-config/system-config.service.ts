@@ -110,6 +110,33 @@ export class SystemConfigService {
     return version;
   }
 
+  async getValueMap(keys?: string[]): Promise<Record<string, string>> {
+    await this.ensureSeeded();
+
+    const normalizedKeys = (keys ?? [])
+      .map((item) => String(item ?? '').trim().toUpperCase())
+      .filter(Boolean);
+
+    const rows = await this.prisma.systemConfigItem.findMany({
+      where: normalizedKeys.length > 0
+        ? {
+            key: {
+              in: normalizedKeys,
+            },
+          }
+        : undefined,
+      select: {
+        key: true,
+        value: true,
+      },
+    });
+
+    return rows.reduce<Record<string, string>>((acc, row) => {
+      acc[row.key] = row.value;
+      return acc;
+    }, {});
+  }
+
   private toFieldSchema(item: {
     key: string;
     value: string;

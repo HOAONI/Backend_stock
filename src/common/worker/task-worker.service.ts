@@ -6,6 +6,7 @@ import { AgentRunBridgeService } from '@/common/agent/agent-run-bridge.service';
 import type { AgentRuntimeConfig } from '@/common/agent/agent.types';
 import { PrismaService } from '@/common/database/prisma.service';
 import { mapAgentRunToAnalysis } from '@/modules/analysis/analysis.mapper';
+import { AnalysisSchedulerService } from '@/modules/analysis/analysis-scheduler.service';
 import { AnalysisBrokerMeta, AnalysisService } from '@/modules/analysis/analysis.service';
 import { TradingAccountService, TradingRuntimeContextPayload } from '@/modules/trading-account/trading-account.service';
 
@@ -53,6 +54,22 @@ function normalizeStockCode(code: string): string {
   return String(code ?? '').trim().toUpperCase().replace(/\.(SH|SZ)$/, '');
 }
 
+function extractUpstreamFailure(rawMessage: string, fallbackCode: string): { code: string; message: string } {
+  const trimmed = String(rawMessage ?? '').trim();
+  const matched = trimmed.match(/^\[([a-z0-9_:-]+)\]\s*(.*)$/i);
+  if (!matched) {
+    return {
+      code: fallbackCode,
+      message: trimmed || 'Unknown task failure',
+    };
+  }
+
+  return {
+    code: String(matched[1] ?? '').trim() || fallbackCode,
+    message: String(matched[2] ?? '').trim() || trimmed,
+  };
+}
+
 function parseTradingSessions(raw: string): Array<{ start: number; end: number }> {
   return String(raw ?? '')
     .split(',')
@@ -72,27 +89,33 @@ function parseTradingSessions(raw: string): Array<{ start: number; end: number }
 @Injectable()
 export class TaskWorkerService {
   private readonly logger = new Logger(TaskWorkerService.name);
+  private readonly workerName = 'analysis_task_worker';
   private running = false;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRunBridge: AgentRunBridgeService,
     private readonly analysisService: AnalysisService,
+    private readonly analysisSchedulerService: AnalysisSchedulerService,
     private readonly tradingAccountService: TradingAccountService,
   ) {}
 
   async start(): Promise<void> {
     this.running = true;
     this.logger.log('Task worker started');
+    await this.reportHeartbeat();
 
     while (this.running) {
       try {
         const processed = await this.processOne();
+        await this.reportHeartbeat();
         if (!processed) {
           await this.sleep(1500);
         }
       } catch (error: unknown) {
-        this.logger.error((error as Error).stack || (error as Error).message);
+        const message = (error as Error).stack || (error as Error).message;
+        this.logger.error(message);
+        await this.reportHeartbeat({ lastError: message });
         await this.sleep(2000);
       }
     }
@@ -102,8 +125,21 @@ export class TaskWorkerService {
     this.running = false;
   }
 
-  private shouldForwardRuntimeConfig(): boolean {
-    return (process.env.AGENT_FORWARD_RUNTIME_CONFIG ?? 'false').toLowerCase() === 'true';
+  private workerMode(): 'embedded' | 'external' {
+    return (process.env.RUN_WORKER_IN_API ?? 'false').toLowerCase() === 'true' ? 'embedded' : 'external';
+  }
+
+  private async reportHeartbeat(input?: { lastTaskId?: string | null; lastError?: string | null }): Promise<void> {
+    try {
+      await this.analysisSchedulerService.updateWorkerHeartbeat({
+        workerName: this.workerName,
+        workerMode: this.workerMode(),
+        lastTaskId: input?.lastTaskId ?? null,
+        lastError: input?.lastError ?? null,
+      });
+    } catch (error: unknown) {
+      this.logger.warn(`worker heartbeat update failed: ${(error as Error).message}`);
+    }
   }
 
   private resolveRuntimeConfigFromPayload(task: { requestPayload: unknown }): AgentRuntimeConfig | null {
@@ -128,6 +164,22 @@ export class TaskWorkerService {
       return `user-${task.ownerUserId}`;
     }
     return null;
+  }
+
+  private resolveFailurePresentation(error: unknown): { code: string; message: string } {
+    const explicitCode = String((error as Error & { code?: string }).code ?? '').trim();
+    const bridgeErrorCode = isAgentRunBridgeError(error) ? error.code : explicitCode || 'internal_error';
+    const rawMessage = (error as Error).message || 'Unknown task failure';
+    const parsed = extractUpstreamFailure(rawMessage, bridgeErrorCode);
+
+    if (bridgeErrorCode === 'agent_task_failed' && parsed.code !== bridgeErrorCode) {
+      return parsed;
+    }
+
+    return {
+      code: bridgeErrorCode,
+      message: rawMessage.slice(0, 500),
+    };
   }
 
   private buildRuntimeContext(payload: TradingRuntimeContextPayload): NonNullable<AgentRuntimeConfig['context']> {
@@ -172,18 +224,20 @@ export class TaskWorkerService {
 
     if (task.ownerUserId != null) {
       const runtime = await this.analysisService.buildRuntimeContext(task.ownerUserId, {
-        includeApiToken: this.shouldForwardRuntimeConfig(),
+        includeApiToken: true,
       });
       const runtimeConfig = this.analysisService.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta);
-      const tradingRuntime = await this.tradingAccountService.getRuntimeContext(task.ownerUserId, true);
-      const runtimeWithContext: AgentRuntimeConfig = {
-        ...runtimeConfig,
-        context: this.buildRuntimeContext(tradingRuntime),
-      };
 
       return {
         accountName: runtime.accountName,
-        runtimeConfig: runtimeWithContext,
+        runtimeConfig: executionMeta.execution_mode === 'broker' && executionMeta.broker_account_id
+          ? {
+              ...runtimeConfig,
+              context: this.buildRuntimeContext(
+                await this.tradingAccountService.getRuntimeContext(task.ownerUserId, true),
+              ),
+            }
+          : runtimeConfig,
         forceRuntimeConfig: true,
         executionMeta,
       };
@@ -201,7 +255,70 @@ export class TaskWorkerService {
   }
 
   private shouldAutoPlaceOrder(meta: AnalysisBrokerMeta): boolean {
-    return meta.requested_execution_mode === 'auto' && Boolean(meta.auto_order_enabled);
+    return meta.requested_execution_mode === 'auto'
+      && meta.execution_mode === 'paper'
+      && Boolean(meta.auto_order_enabled);
+  }
+
+  private resolveExecutionSnapshot(runPayload: Record<string, unknown>, stockCode: string): Record<string, unknown> {
+    const executionRoot = asRecord(runPayload.execution_snapshot) ?? {};
+    return asRecord(executionRoot[stockCode]) ?? executionRoot;
+  }
+
+  private deriveAutoOrderFromExecution(input: {
+    task: { stockCode: string };
+    runPayload: Record<string, unknown>;
+    executionMeta: AnalysisBrokerMeta;
+  }): Record<string, unknown> | null {
+    if (input.executionMeta.requested_execution_mode !== 'auto') {
+      return null;
+    }
+
+    const execution = this.resolveExecutionSnapshot(input.runPayload, input.task.stockCode);
+    const state = String(execution.state ?? '').trim().toLowerCase();
+    const action = String(execution.action ?? '').trim().toLowerCase();
+    const executedVia = String(execution.executed_via ?? execution.executedVia ?? '').trim();
+    const brokerRequested = Boolean(execution.broker_requested ?? execution.brokerRequested);
+    const providerOrderId = String(execution.broker_ticket_id ?? execution.brokerTicketId ?? '').trim() || null;
+
+    if (input.executionMeta.execution_mode !== 'broker' && executedVia !== 'backtrader_internal' && !brokerRequested) {
+      return null;
+    }
+
+    if (state === 'failed') {
+      return {
+        status: 'failed',
+        source: 'agent_execution',
+        executed_via: executedVia || 'backtrader_internal',
+        reason: String(execution.reason ?? 'broker_rejected').trim() || 'broker_rejected',
+        error: String(execution.error_message ?? execution.errorMessage ?? '').trim() || null,
+        provider_order_id: providerOrderId,
+        order_id: execution.order_id ?? execution.orderId ?? null,
+        trade_id: execution.trade_id ?? execution.tradeId ?? null,
+      };
+    }
+
+    if (state === 'skipped' || action === 'none') {
+      return {
+        status: 'skipped',
+        source: 'agent_execution',
+        executed_via: executedVia || 'backtrader_internal',
+        reason: String(execution.reason ?? 'target_matched').trim() || 'target_matched',
+      };
+    }
+
+    return {
+      status: 'submitted',
+      source: 'agent_execution',
+      executed_via: executedVia || 'backtrader_internal',
+      reason: String(execution.reason ?? 'broker_executed').trim() || 'broker_executed',
+      action,
+      traded_qty: execution.traded_qty ?? execution.tradedQty ?? null,
+      fill_price: execution.fill_price ?? execution.fillPrice ?? null,
+      provider_order_id: providerOrderId,
+      order_id: execution.order_id ?? execution.orderId ?? null,
+      trade_id: execution.trade_id ?? execution.tradeId ?? null,
+    };
   }
 
   private isAShare(code: string): boolean {
@@ -466,9 +583,19 @@ export class TaskWorkerService {
   }
 
   private async processOne(): Promise<boolean> {
+    const now = new Date();
     const candidate = await this.prisma.analysisTask.findFirst({
-      where: { status: AnalysisTaskStatus.pending },
-      orderBy: { createdAt: 'asc' },
+      where: {
+        status: AnalysisTaskStatus.pending,
+        OR: [
+          { runAfter: null },
+          { runAfter: { lte: now } },
+        ],
+      },
+      orderBy: [
+        { priority: 'asc' },
+        { createdAt: 'asc' },
+      ],
     });
 
     if (!candidate) {
@@ -492,6 +619,7 @@ export class TaskWorkerService {
       return false;
     }
 
+    await this.reportHeartbeat({ lastTaskId: candidate.taskId });
     await this.handleTask(candidate.id);
     return true;
   }
@@ -510,7 +638,13 @@ export class TaskWorkerService {
         forceRuntimeConfig: options.forceRuntimeConfig,
       });
       const mapped = mapAgentRunToAnalysis(bridgeResult.run, task.stockCode, task.reportType);
-      const autoOrder = await this.maybeAutoPlaceOrder({
+      const autoOrder = this.deriveAutoOrderFromExecution({
+        task: {
+          stockCode: task.stockCode,
+        },
+        runPayload: bridgeResult.run as unknown as Record<string, unknown>,
+        executionMeta: options.executionMeta,
+      }) ?? await this.maybeAutoPlaceOrder({
         task: {
           taskId: task.taskId,
           stockCode: task.stockCode,
@@ -558,9 +692,10 @@ export class TaskWorkerService {
           updatedAt: new Date(),
         },
       });
+      await this.reportHeartbeat({ lastTaskId: task.taskId });
     } catch (error: unknown) {
-      const explicitCode = String((error as Error & { code?: string }).code ?? '').trim();
-      const bridgeErrorCode = isAgentRunBridgeError(error) ? error.code : explicitCode || 'internal_error';
+      const failure = this.resolveFailurePresentation(error);
+      const bridgeErrorCode = failure.code;
       const explicitBridgeMeta = asRecord((error as { bridgeMeta?: unknown }).bridgeMeta);
       const bridgeMeta = isAgentRunBridgeError(error)
         ? error.bridgeMeta
@@ -583,8 +718,7 @@ export class TaskWorkerService {
             last_agent_status: null,
             bridge_error_code: bridgeErrorCode,
           };
-      const rawMessage = (error as Error).message || 'Unknown task failure';
-      const safeMessage = rawMessage.slice(0, 500);
+      const safeMessage = failure.message.slice(0, 500);
       const uiMessage = `分析失败(${bridgeErrorCode}): ${safeMessage}`.slice(0, 200);
 
       this.logger.error(`Task failed: ${task.taskId} [${bridgeErrorCode}] ${safeMessage}`);
@@ -610,6 +744,7 @@ export class TaskWorkerService {
           updatedAt: new Date(),
         },
       });
+      await this.reportHeartbeat({ lastTaskId: task.taskId, lastError: safeMessage });
     }
   }
 

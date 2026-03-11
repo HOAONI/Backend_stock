@@ -1,6 +1,7 @@
 import { Controller, Get, HttpException, HttpStatus, Param, ParseIntPipe, Query, Req } from '@nestjs/common';
 import { Request } from 'express';
 
+import { BUILTIN_ROLE_CODES } from '@/common/auth/rbac.constants';
 import { ListAdminLogsQueryDto } from './admin-logs.dto';
 import { AdminLogsService } from './admin-logs.service';
 
@@ -34,7 +35,7 @@ export class AdminLogsController {
     }
     return {
       userId: user.id,
-      includeAll: user.roleCodes.includes('super_admin'),
+      includeAll: user.roleCodes.includes(BUILTIN_ROLE_CODES.admin),
     };
   }
 

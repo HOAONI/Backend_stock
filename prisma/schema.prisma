@@ -12,6 +12,7 @@ enum AnalysisTaskStatus {
   processing
   completed
   failed
+  cancelled
 }
 
 enum AdminUserStatus {
@@ -195,6 +196,25 @@ model BacktestSummary {
   @@map("backtest_summaries")
 }
 
+model UserBacktestStrategy {
+  id            Int       @id @default(autoincrement())
+  ownerUserId   Int       @map("owner_user_id")
+  name          String    @db.VarChar(64)
+  description   String?   @db.VarChar(255)
+  templateCode  String    @map("template_code") @db.VarChar(32)
+  paramsJson    Json      @map("params_json")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  ownerUser     AdminUser             @relation("UserBacktestStrategyOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  strategyRuns  StrategyBacktestRun[] @relation("StrategyBacktestRunSavedStrategy")
+
+  @@unique([ownerUserId, name], map: "uix_user_backtest_strategies_owner_name")
+  @@index([ownerUserId, updatedAt], map: "ix_user_backtest_strategies_owner_updated")
+  @@index([ownerUserId, templateCode], map: "ix_user_backtest_strategies_owner_template")
+  @@map("user_backtest_strategies")
+}
+
 model StrategyBacktestRunGroup {
   id                 Int       @id @default(autoincrement())
   ownerUserId        Int?      @map("owner_user_id")
@@ -215,20 +235,24 @@ model StrategyBacktestRunGroup {
 }
 
 model StrategyBacktestRun {
-  id              Int       @id @default(autoincrement())
-  runGroupId      Int       @map("run_group_id")
-  strategyCode    String    @map("strategy_code") @db.VarChar(32)
-  strategyVersion String    @default("v1") @map("strategy_version") @db.VarChar(32)
-  paramsJson      Json?     @map("params_json")
-  metricsJson     Json?     @map("metrics_json")
-  benchmarkJson   Json?     @map("benchmark_json")
-  createdAt       DateTime  @default(now()) @map("created_at")
+  id               Int       @id @default(autoincrement())
+  runGroupId       Int       @map("run_group_id")
+  savedStrategyId  Int?      @map("saved_strategy_id")
+  savedStrategyName String?  @map("saved_strategy_name") @db.VarChar(64)
+  strategyCode     String    @map("strategy_code") @db.VarChar(32)
+  strategyVersion  String    @default("v1") @map("strategy_version") @db.VarChar(32)
+  paramsJson       Json?     @map("params_json")
+  metricsJson      Json?     @map("metrics_json")
+  benchmarkJson    Json?     @map("benchmark_json")
+  createdAt        DateTime  @default(now()) @map("created_at")
 
   runGroup        StrategyBacktestRunGroup  @relation(fields: [runGroupId], references: [id], onDelete: Cascade)
+  savedStrategy   UserBacktestStrategy?     @relation("StrategyBacktestRunSavedStrategy", fields: [savedStrategyId], references: [id], onDelete: SetNull)
   trades          StrategyBacktestTrade[]
   equityPoints    StrategyBacktestEquityPoint[]
 
   @@index([runGroupId, strategyCode], map: "ix_strategy_backtest_run_group_strategy")
+  @@index([savedStrategyId], map: "ix_strategy_backtest_run_saved_strategy")
   @@map("strategy_backtest_runs")
 }
 
@@ -266,10 +290,132 @@ model StrategyBacktestEquityPoint {
   @@map("strategy_backtest_equity_points")
 }
 
+model AgentBacktestRunGroup {
+  id                  Int       @id @default(autoincrement())
+  ownerUserId         Int?      @map("owner_user_id")
+  code                String    @db.VarChar(16)
+  startDate           DateTime  @map("start_date") @db.Date
+  endDate             DateTime  @map("end_date") @db.Date
+  effectiveStartDate  DateTime? @map("effective_start_date") @db.Date
+  effectiveEndDate    DateTime? @map("effective_end_date") @db.Date
+  engineVersion       String    @default("agent_replay_v1") @map("engine_version") @db.VarChar(32)
+  status              String    @default("completed") @db.VarChar(16)
+  phase               String    @default("done") @db.VarChar(16)
+  requestHash         String    @unique(map: "uix_agent_backtest_request_hash") @map("request_hash") @db.VarChar(128)
+  activeResultVersion Int       @default(1) @map("active_result_version")
+  latestResultVersion Int       @default(1) @map("latest_result_version")
+  progressPct         Int       @default(100) @map("progress_pct")
+  message             String?   @db.VarChar(255)
+  configJson          Json?     @map("config_json")
+  summaryJson         Json?     @map("summary_json")
+  diagnosticsJson     Json?     @map("diagnostics_json")
+  fastReadyAt         DateTime? @map("fast_ready_at")
+  completedAt         DateTime? @map("completed_at")
+  errorMessage        String?   @map("error_message")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  ownerUser           AdminUser? @relation("AgentBacktestRunGroupOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  dailySteps          AgentBacktestDailyStep[]
+  trades              AgentBacktestTrade[]
+  equityPoints        AgentBacktestEquityPoint[]
+
+  @@index([ownerUserId, createdAt], map: "ix_agent_backtest_group_owner_created")
+  @@index([status, phase, createdAt], map: "ix_agent_backtest_group_status_phase_created")
+  @@index([code, startDate, endDate], map: "ix_agent_backtest_group_code_range")
+  @@map("agent_backtest_run_groups")
+}
+
+model AgentBacktestDailyStep {
+  id                   Int       @id @default(autoincrement())
+  runGroupId           Int       @map("run_group_id")
+  resultVersion        Int       @default(1) @map("result_version")
+  tradeDate            DateTime  @map("trade_date") @db.Date
+  decisionSource       String    @map("decision_source") @db.VarChar(32)
+  aiUsed               Boolean   @default(false) @map("ai_used")
+  dataPayloadJson      Json?     @map("data_payload_json")
+  signalPayloadJson    Json?     @map("signal_payload_json")
+  riskPayloadJson      Json?     @map("risk_payload_json")
+  executionPayloadJson Json?     @map("execution_payload_json")
+
+  runGroup             AgentBacktestRunGroup @relation(fields: [runGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([runGroupId, resultVersion, tradeDate], map: "uix_agent_backtest_step_group_version_day")
+  @@index([runGroupId, resultVersion, tradeDate], map: "ix_agent_backtest_step_group_version_day")
+  @@map("agent_backtest_daily_steps")
+}
+
+model AgentBacktestTrade {
+  id             Int       @id @default(autoincrement())
+  runGroupId     Int       @map("run_group_id")
+  resultVersion  Int       @default(1) @map("result_version")
+  entryDate      DateTime? @map("entry_date") @db.Date
+  exitDate       DateTime? @map("exit_date") @db.Date
+  entryPrice     Float?    @map("entry_price")
+  exitPrice      Float?    @map("exit_price")
+  qty            Int?
+  grossReturnPct Float?    @map("gross_return_pct")
+  netReturnPct   Float?    @map("net_return_pct")
+  fees           Float?
+  exitReason     String?   @map("exit_reason") @db.VarChar(64)
+
+  runGroup       AgentBacktestRunGroup @relation(fields: [runGroupId], references: [id], onDelete: Cascade)
+
+  @@index([runGroupId, resultVersion, entryDate], map: "ix_agent_backtest_trade_group_version_entry")
+  @@map("agent_backtest_trades")
+}
+
+model AgentBacktestEquityPoint {
+  id              Int       @id @default(autoincrement())
+  runGroupId      Int       @map("run_group_id")
+  resultVersion   Int       @default(1) @map("result_version")
+  tradeDate       DateTime  @map("trade_date") @db.Date
+  equity          Float
+  drawdownPct     Float?    @map("drawdown_pct")
+  benchmarkEquity Float?    @map("benchmark_equity")
+  positionRatio   Float?    @map("position_ratio")
+  cash            Float?
+
+  runGroup        AgentBacktestRunGroup @relation(fields: [runGroupId], references: [id], onDelete: Cascade)
+
+  @@index([runGroupId, resultVersion, tradeDate], map: "ix_agent_backtest_equity_group_version_day")
+  @@map("agent_backtest_equity_points")
+}
+
+model AgentBacktestSignalSnapshot {
+  id                       Int       @id @default(autoincrement())
+  ownerUserId              Int?      @map("owner_user_id")
+  code                     String    @db.VarChar(16)
+  tradeDate                DateTime  @map("trade_date") @db.Date
+  signalProfileHash        String    @map("signal_profile_hash") @db.VarChar(128)
+  snapshotVersion          Int       @default(1) @map("snapshot_version")
+  decisionSource           String    @map("decision_source") @db.VarChar(32)
+  llmUsed                  Boolean   @default(false) @map("llm_used")
+  confidence               Float?
+  factorPayloadJson        Json?     @map("factor_payload_json")
+  archivedNewsPayloadJson  Json?     @map("archived_news_payload_json")
+  signalPayloadJson        Json?     @map("signal_payload_json")
+  aiOverlayJson            Json?     @map("ai_overlay_json")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
+
+  ownerUser                AdminUser? @relation("AgentBacktestSignalSnapshotOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@unique([ownerUserId, code, tradeDate, signalProfileHash, snapshotVersion], map: "uix_agent_backtest_signal_owner_code_day_profile_version")
+  @@index([ownerUserId, code, tradeDate], map: "ix_agent_backtest_signal_owner_code_day")
+  @@map("agent_backtest_signal_snapshots")
+}
+
 model AnalysisTask {
   id             Int                @id @default(autoincrement())
   ownerUserId    Int?               @map("owner_user_id")
   taskId         String             @unique @map("task_id") @db.VarChar(64)
+  rootTaskId     String?            @map("root_task_id") @db.VarChar(64)
+  retryOfTaskId  String?            @map("retry_of_task_id") @db.VarChar(64)
+  attemptNo      Int                @default(1) @map("attempt_no")
+  priority       Int                @default(100)
+  runAfter       DateTime?          @map("run_after")
+  cancelledAt    DateTime?          @map("cancelled_at")
   stockCode      String             @map("stock_code") @db.VarChar(16)
   reportType     String             @map("report_type") @default("detailed") @db.VarChar(16)
   status         AnalysisTaskStatus @default(pending)
@@ -286,9 +432,25 @@ model AnalysisTask {
   ownerUser      AdminUser?         @relation("AnalysisTaskOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
 
   @@index([status, createdAt], map: "ix_analysis_tasks_status_created")
+  @@index([status, priority, createdAt], map: "ix_analysis_tasks_status_priority_created")
+  @@index([runAfter, status], map: "ix_analysis_tasks_run_after_status")
   @@index([stockCode, status], map: "ix_analysis_tasks_stock_status")
   @@index([ownerUserId, createdAt], map: "ix_analysis_tasks_owner_created")
+  @@index([rootTaskId, attemptNo], map: "ix_analysis_tasks_root_attempt")
   @@map("analysis_tasks")
+}
+
+model SchedulerWorkerHeartbeat {
+  id           Int      @id @default(autoincrement())
+  workerName   String   @unique @map("worker_name") @db.VarChar(64)
+  workerMode   String   @map("worker_mode") @db.VarChar(16)
+  lastSeenAt   DateTime @map("last_seen_at")
+  lastTaskId   String?  @map("last_task_id") @db.VarChar(64)
+  lastError    String?  @map("last_error") @db.VarChar(500)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("scheduler_worker_heartbeats")
 }
 
 model SystemConfigItem {
@@ -337,7 +499,10 @@ model AdminUser {
   ownedNews               NewsIntel[]       @relation("NewsIntelOwner")
   ownedBacktestResults    BacktestResult[]  @relation("BacktestResultOwner")
   ownedBacktestSummaries  BacktestSummary[] @relation("BacktestSummaryOwner")
+  ownedUserBacktestStrategies UserBacktestStrategy[] @relation("UserBacktestStrategyOwner")
   ownedStrategyBacktestRunGroups StrategyBacktestRunGroup[] @relation("StrategyBacktestRunGroupOwner")
+  ownedAgentBacktestRunGroups AgentBacktestRunGroup[] @relation("AgentBacktestRunGroupOwner")
+  ownedAgentBacktestSignalSnapshots AgentBacktestSignalSnapshot[] @relation("AgentBacktestSignalSnapshotOwner")
   brokerAccounts          UserBrokerAccount[]
   brokerSnapshotCaches    UserBrokerSnapshotCache[] @relation("BrokerSnapshotCacheUser")
   agentCredentialTickets  AgentCredentialTicket[] @relation("AgentCredentialTicketUser")

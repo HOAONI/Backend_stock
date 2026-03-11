@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 
+import { AgentBacktestWorkerService } from './common/worker/agent-backtest-worker.service';
 import { TaskWorkerService } from './common/worker/task-worker.service';
 import { WorkerModule } from './common/worker/worker.module';
 
@@ -24,21 +25,24 @@ async function bootstrapWorker(): Promise<void> {
     logger: ['error', 'warn', 'log'],
   });
 
-  const service = app.get(TaskWorkerService);
+  const services = [
+    app.get(TaskWorkerService),
+    app.get(AgentBacktestWorkerService),
+  ];
 
   process.on('SIGINT', async () => {
-    service.stop();
+    services.forEach(service => service.stop());
     await app.close();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
-    service.stop();
+    services.forEach(service => service.stop());
     await app.close();
     process.exit(0);
   });
 
-  await service.start();
+  await Promise.all(services.map(service => service.start()));
 }
 
 bootstrapWorker().catch((error: unknown) => {

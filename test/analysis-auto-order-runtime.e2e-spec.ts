@@ -29,12 +29,43 @@ jest.mock('../src/modules/analysis/analysis.mapper', () => ({
 }));
 
 describe('Runtime config forwarding and auto-order guards', () => {
-  const baseExecutionMeta = {
+  const createAiRuntimeService = (override?: Record<string, unknown>) => ({
+    resolveEffectiveLlmFromProfile: jest.fn(async () => ({
+      source: 'personal',
+      hasPersonalToken: true,
+      personalProvider: 'openai',
+      hasSystemToken: true,
+      systemDefault: {
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-4o-mini',
+        hasToken: true,
+      },
+      effective: {
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-4o-mini',
+      },
+      apiToken: 'personal-token-xyz',
+      requiresProviderReselection: false,
+      forwardRuntimeLlm: true,
+      ...override,
+    })),
+  });
+
+  const legacyExecutionMeta = {
     execution_mode: 'paper' as const,
     requested_execution_mode: 'auto' as const,
     broker_account_id: 3,
     auto_order_enabled: true,
-    broker_plan_reason: 'auto_submit_backtrader_local',
+    broker_plan_reason: 'legacy_worker_auto_order',
+  };
+  const brokerExecutionMeta = {
+    execution_mode: 'broker' as const,
+    requested_execution_mode: 'auto' as const,
+    broker_account_id: 3,
+    auto_order_enabled: true,
+    broker_plan_reason: 'agent_execute_backtrader_local',
   };
 
   describe('AnalysisService.runSync', () => {
@@ -64,6 +95,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
       const brokerAccountsService = {
         resolveSimulationAccess: jest.fn(async () => ({ brokerAccountId: 3 })),
       } as any;
+      const aiRuntimeService = createAiRuntimeService();
       const tradingAccountService = {
         getRuntimeContext: jest.fn(async () => ({
           broker_account_id: 3,
@@ -94,7 +126,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
       const service = new AnalysisService(
         prisma,
         agentRunBridge,
-        {} as any,
+        aiRuntimeService as any,
         brokerAccountsService,
         tradingAccountService,
       );
@@ -110,7 +142,205 @@ describe('Runtime config forwarding and auto-order guards', () => {
       expect(agentRunBridge.runViaAsyncTask).toHaveBeenCalledTimes(1);
       const options = (agentRunBridge.runViaAsyncTask as jest.Mock).mock.calls[0]?.[2] as Record<string, unknown>;
       expect(options.forceRuntimeConfig).toBe(true);
+      expect(((options.runtimeConfig as Record<string, unknown>).llm as Record<string, unknown>).api_token).toBe('personal-token-xyz');
       expect((options.runtimeConfig as Record<string, unknown>).context).toBeDefined();
+      expect(((options.runtimeConfig as Record<string, unknown>).execution as Record<string, unknown>).mode).toBe('broker');
+    });
+
+    it('keeps paper mode account-agnostic and does not require broker runtime context', async () => {
+      const prisma = {
+        adminUserProfile: {
+          findUnique: jest.fn(async () => null),
+        },
+        adminUser: {
+          findUnique: jest.fn(async () => ({ username: 'tester' })),
+        },
+        $transaction: jest.fn(async (queries: Array<Promise<unknown>>) => Promise.all(queries)),
+        analysisHistory: { create: jest.fn(async () => ({})) },
+      } as any;
+      const agentRunBridge = {
+        runViaAsyncTask: jest.fn(async () => ({
+          run: {},
+          bridgeMeta: {
+            agent_task_id: 't1',
+            agent_run_id: 'r1',
+            poll_attempts: 0,
+            last_agent_status: 'completed',
+            bridge_error_code: null,
+          },
+        })),
+      } as any;
+      const brokerAccountsService = {
+        resolveSimulationAccess: jest.fn(async () => {
+          throw new Error('paper mode should not resolve broker access');
+        }),
+      } as any;
+      const aiRuntimeService = createAiRuntimeService();
+      const tradingAccountService = {
+        getRuntimeContext: jest.fn(async () => {
+          throw new Error('paper mode should not refresh broker runtime context');
+        }),
+      } as any;
+
+      const service = new AnalysisService(
+        prisma,
+        agentRunBridge,
+        aiRuntimeService as any,
+        brokerAccountsService,
+        tradingAccountService,
+      );
+
+      await service.runSync({
+        stockCode: '600121',
+        reportType: 'detailed',
+        userId: 1,
+        executionMode: 'paper',
+      });
+
+      expect(brokerAccountsService.resolveSimulationAccess).not.toHaveBeenCalled();
+      expect(tradingAccountService.getRuntimeContext).not.toHaveBeenCalled();
+      const options = (agentRunBridge.runViaAsyncTask as jest.Mock).mock.calls[0]?.[2] as Record<string, unknown>;
+      expect(((options.runtimeConfig as Record<string, unknown>).execution as Record<string, unknown>).mode).toBe('paper');
+      expect((options.runtimeConfig as Record<string, unknown>).context).toBeUndefined();
+    });
+
+    it('preserves analysis-only fallback when auto order is globally disabled', async () => {
+      const previous = process.env.ANALYSIS_AUTO_ORDER_ENABLED;
+      process.env.ANALYSIS_AUTO_ORDER_ENABLED = 'false';
+
+      const prisma = {
+        adminUserProfile: {
+          findUnique: jest.fn(async () => null),
+        },
+        adminUser: {
+          findUnique: jest.fn(async () => ({ username: 'tester' })),
+        },
+        $transaction: jest.fn(async (queries: Array<Promise<unknown>>) => Promise.all(queries)),
+        analysisHistory: { create: jest.fn(async () => ({})) },
+      } as any;
+      const agentRunBridge = {
+        runViaAsyncTask: jest.fn(async () => ({
+          run: {},
+          bridgeMeta: {
+            agent_task_id: 't1',
+            agent_run_id: 'r1',
+            poll_attempts: 0,
+            last_agent_status: 'completed',
+            bridge_error_code: null,
+          },
+        })),
+      } as any;
+      const brokerAccountsService = {
+        resolveSimulationAccess: jest.fn(async () => {
+          throw new Error('disabled auto order should not resolve broker access');
+        }),
+      } as any;
+      const aiRuntimeService = createAiRuntimeService();
+      const tradingAccountService = {
+        getRuntimeContext: jest.fn(async () => {
+          throw new Error('disabled auto order should not refresh broker runtime context');
+        }),
+      } as any;
+
+      const service = new AnalysisService(
+        prisma,
+        agentRunBridge,
+        aiRuntimeService as any,
+        brokerAccountsService,
+        tradingAccountService,
+      );
+
+      try {
+        await service.runSync({
+          stockCode: '600121',
+          reportType: 'detailed',
+          userId: 1,
+          executionMode: 'auto',
+        });
+      } finally {
+        if (previous == null) {
+          delete process.env.ANALYSIS_AUTO_ORDER_ENABLED;
+        } else {
+          process.env.ANALYSIS_AUTO_ORDER_ENABLED = previous;
+        }
+      }
+
+      expect(brokerAccountsService.resolveSimulationAccess).not.toHaveBeenCalled();
+      expect(tradingAccountService.getRuntimeContext).not.toHaveBeenCalled();
+      const options = (agentRunBridge.runViaAsyncTask as jest.Mock).mock.calls[0]?.[2] as Record<string, unknown>;
+      expect(((options.runtimeConfig as Record<string, unknown>).execution as Record<string, unknown>).mode).toBe('paper');
+      expect((options.runtimeConfig as Record<string, unknown>).context).toBeUndefined();
+    });
+
+    it('omits llm override when using the Agent built-in system default', async () => {
+      const prisma = {
+        adminUserProfile: {
+          findUnique: jest.fn(async () => null),
+        },
+        adminUser: {
+          findUnique: jest.fn(async () => ({ username: 'tester' })),
+        },
+        $transaction: jest.fn(async (queries: Array<Promise<unknown>>) => Promise.all(queries)),
+        analysisHistory: { create: jest.fn(async () => ({})) },
+      } as any;
+      const agentRunBridge = {
+        runViaAsyncTask: jest.fn(async () => ({
+          run: {},
+          bridgeMeta: {
+            agent_task_id: 't1',
+            agent_run_id: 'r1',
+            poll_attempts: 0,
+            last_agent_status: 'completed',
+            bridge_error_code: null,
+          },
+        })),
+      } as any;
+      const brokerAccountsService = {
+        resolveSimulationAccess: jest.fn(async () => {
+          throw new Error('paper mode should not resolve broker access');
+        }),
+      } as any;
+      const aiRuntimeService = createAiRuntimeService({
+        source: 'system',
+        hasPersonalToken: false,
+        personalProvider: '',
+        systemDefault: {
+          provider: 'deepseek',
+          baseUrl: 'https://api.deepseek.com/v1',
+          model: 'deepseek-chat',
+          hasToken: true,
+        },
+        effective: {
+          provider: 'deepseek',
+          baseUrl: 'https://api.deepseek.com/v1',
+          model: 'deepseek-chat',
+        },
+        apiToken: null,
+        forwardRuntimeLlm: false,
+      });
+      const tradingAccountService = {
+        getRuntimeContext: jest.fn(async () => {
+          throw new Error('paper mode should not refresh broker runtime context');
+        }),
+      } as any;
+
+      const service = new AnalysisService(
+        prisma,
+        agentRunBridge,
+        aiRuntimeService as any,
+        brokerAccountsService,
+        tradingAccountService,
+      );
+
+      await service.runSync({
+        stockCode: '600121',
+        reportType: 'detailed',
+        userId: 1,
+        executionMode: 'paper',
+      });
+
+      const options = (agentRunBridge.runViaAsyncTask as jest.Mock).mock.calls[0]?.[2] as Record<string, unknown>;
+      expect((options.runtimeConfig as Record<string, unknown>).llm).toBeUndefined();
     });
   });
 
@@ -150,6 +380,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
         {} as any,
         {} as any,
         {} as any,
+        {} as any,
         tradingAccountService,
       );
 
@@ -168,7 +399,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
             },
           },
         },
-        executionMeta: baseExecutionMeta,
+        executionMeta: legacyExecutionMeta,
       });
 
       expect(result).toMatchObject({
@@ -206,6 +437,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
         {} as any,
         {} as any,
         {} as any,
+        {} as any,
         tradingAccountService,
       );
 
@@ -224,7 +456,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
             },
           },
         },
-        executionMeta: baseExecutionMeta,
+        executionMeta: legacyExecutionMeta,
       });
 
       expect(result).toMatchObject({
@@ -233,6 +465,63 @@ describe('Runtime config forwarding and auto-order guards', () => {
       });
       expect(tradingAccountService.getRuntimeContext).toHaveBeenCalledWith(1, true);
       expect(tradingAccountService.placeOrder).not.toHaveBeenCalled();
+    });
+
+    it('does not trigger legacy worker placement when Agent already owns broker execution', async () => {
+      const service = new TaskWorkerService(
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+
+      expect((service as any).shouldAutoPlaceOrder(brokerExecutionMeta)).toBe(false);
+      expect((service as any).deriveAutoOrderFromExecution({
+        task: { stockCode: '600121' },
+        runPayload: {
+          execution_snapshot: {
+            '600121': {
+              state: 'ready',
+              action: 'buy',
+              traded_qty: 600,
+              fill_price: 4.78,
+              executed_via: 'backtrader_internal',
+              broker_requested: true,
+              broker_ticket_id: 'bt-order-11',
+              order_id: 11,
+              trade_id: 22,
+              reason: 'broker_executed',
+            },
+          },
+        },
+        executionMeta: brokerExecutionMeta,
+      })).toMatchObject({
+        status: 'submitted',
+        source: 'agent_execution',
+        executed_via: 'backtrader_internal',
+        provider_order_id: 'bt-order-11',
+        order_id: 11,
+        trade_id: 22,
+      });
+    });
+
+    it('promotes upstream llm timeout code from agent task failures', async () => {
+      const service = new TaskWorkerService(
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+
+      expect((service as any).resolveFailurePresentation({
+        code: 'agent_task_failed',
+        message: '[llm_request_timeout] DeepSeek request timed out after 120000ms',
+      })).toEqual({
+        code: 'llm_request_timeout',
+        message: 'DeepSeek request timed out after 120000ms',
+      });
     });
   });
 

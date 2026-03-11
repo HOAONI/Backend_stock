@@ -212,8 +212,8 @@ export class AdminRolesService {
   async update(id: number, input: UpdateAdminRoleDto): Promise<Record<string, unknown>> {
     const role = await this.loadRoleOrThrow(id);
 
-    if (role.roleCode === BUILTIN_ROLE_CODES.superAdmin && input.role_code) {
-      throw createServiceError('FORBIDDEN', 'super_admin 角色编码不允许修改');
+    if (role.roleCode === BUILTIN_ROLE_CODES.admin && input.role_code) {
+      throw createServiceError('FORBIDDEN', 'admin 角色编码不允许修改');
     }
 
     const nextRoleCode = input.role_code != null ? normalizeRoleCode(input.role_code) : role.roleCode;
@@ -267,8 +267,8 @@ export class AdminRolesService {
   async softDelete(id: number): Promise<Record<string, unknown>> {
     const role = await this.loadRoleOrThrow(id);
 
-    if (role.roleCode === BUILTIN_ROLE_CODES.superAdmin) {
-      throw createServiceError('FORBIDDEN', 'super_admin 角色禁止删除');
+    if (role.roleCode === BUILTIN_ROLE_CODES.admin) {
+      throw createServiceError('FORBIDDEN', 'admin 角色禁止删除');
     }
 
     const assignedUserCount = await this.countAssignedUsers(id);

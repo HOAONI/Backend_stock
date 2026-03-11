@@ -26,6 +26,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "db:push": "prisma db push",
     "db:constraints": "tsx -r tsconfig-paths/register scripts/apply-postgres-constraints.ts",
+    "db:prepare:runtime": "tsx -r tsconfig-paths/register scripts/prepare-runtime-db.ts",
     "cleanup:legacy-broker-data": "tsx -r tsconfig-paths/register scripts/cleanup-legacy-broker-data.ts",
     "db:init": "bash scripts/db-init.sh",
     "migrate:sqlite": "tsx -r tsconfig-paths/register scripts/migrate-sqlite-to-postgres.ts",

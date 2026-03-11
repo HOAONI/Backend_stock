@@ -3,6 +3,15 @@ import { Injectable } from '@nestjs/common';
 import { AgentClientError } from './agent.errors';
 import { AgentRunPayload, AgentTaskPayload, CreateAgentRunOptions } from './agent.types';
 
+export interface AgentRuntimeLlmDefaultPayload {
+  available: boolean;
+  source?: string;
+  provider?: string | null;
+  model?: string | null;
+  base_url?: string | null;
+  has_token?: boolean;
+}
+
 @Injectable()
 export class AgentClientService {
   private readonly baseUrl: string;
@@ -162,5 +171,17 @@ export class AgentClientService {
 
   async getRun(runId: string): Promise<AgentRunPayload> {
     return await this.request<AgentRunPayload>(`/api/v1/runs/${encodeURIComponent(runId)}`);
+  }
+
+  async getHealthLive(): Promise<Record<string, unknown>> {
+    return await this.request<Record<string, unknown>>('/api/health/live');
+  }
+
+  async getHealthReady(): Promise<Record<string, unknown>> {
+    return await this.request<Record<string, unknown>>('/api/health/ready');
+  }
+
+  async getRuntimeLlmDefault(): Promise<AgentRuntimeLlmDefaultPayload> {
+    return await this.request<AgentRuntimeLlmDefaultPayload>('/internal/v1/runtime/llm-default');
   }
 }

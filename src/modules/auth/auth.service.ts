@@ -4,7 +4,12 @@ import * as argon2 from 'argon2';
 import { randomUUID } from 'node:crypto';
 
 import { PrismaService } from '@/common/database/prisma.service';
-import { MIN_PASSWORD_LEN, RATE_LIMIT_MAX_FAILURES, RATE_LIMIT_WINDOW_SEC } from '@/common/auth/auth.constants';
+import {
+  DEFAULT_ADMIN_REGISTER_SECRET,
+  MIN_PASSWORD_LEN,
+  RATE_LIMIT_MAX_FAILURES,
+  RATE_LIMIT_WINDOW_SEC,
+} from '@/common/auth/auth.constants';
 import { parseSessionCookie, verifySessionCookie } from '@/common/auth/auth.utils';
 import { AuthenticatedUserContext, CurrentUserPayload } from '@/common/auth/auth.types';
 import {
@@ -14,6 +19,7 @@ import {
   normalizeRoleCode,
   normalizeUsername,
   RbacModuleCode,
+  resolveBuiltinRolePermissions,
 } from '@/common/auth/rbac.constants';
 
 interface SessionRecord {
@@ -81,19 +87,14 @@ export class AuthService implements OnModuleInit {
   private async seedBuiltinRolesAndUsers(): Promise<void> {
     const roleMeta = [
       {
-        roleCode: BUILTIN_ROLE_CODES.superAdmin,
-        roleName: '超级管理员',
-        description: '拥有系统全部权限',
+        roleCode: BUILTIN_ROLE_CODES.admin,
+        roleName: '管理员',
+        description: '拥有系统后台管理权限（不含角色管理）',
       },
       {
-        roleCode: BUILTIN_ROLE_CODES.analyst,
-        roleName: '分析员',
-        description: '负责分析和回测能力',
-      },
-      {
-        roleCode: BUILTIN_ROLE_CODES.operator,
-        roleName: '操作员',
-        description: '负责系统配置与运营',
+        roleCode: BUILTIN_ROLE_CODES.user,
+        roleName: '普通用户',
+        description: '可使用分析、回测、交易与个人设置能力',
       },
     ] as const;
 
@@ -159,43 +160,105 @@ export class AuthService implements OnModuleInit {
         }
       }
 
-      const userCount = await tx.adminUser.count({ where: { isDeleted: false } });
-      if (userCount > 0) {
-        return;
+      const adminRoleId = roles.get(BUILTIN_ROLE_CODES.admin);
+      const userRoleId = roles.get(BUILTIN_ROLE_CODES.user);
+      if (!adminRoleId || !userRoleId) {
+        throw new Error('无法初始化 admin/user 角色');
       }
 
-      const username = normalizeUsername(process.env.ADMIN_INIT_USERNAME || 'admin');
-      const usernameError = this.validateUsername(username);
-      if (usernameError) {
-        throw new Error(`ADMIN_INIT_USERNAME 无效: ${usernameError}`);
-      }
-
-      const initPassword = String(process.env.ADMIN_INIT_PASSWORD ?? '').trim();
-      const passwordError = this.validatePassword(initPassword);
-      if (passwordError) {
-        throw new Error(`首次启动需要设置 ADMIN_INIT_PASSWORD: ${passwordError}`);
-      }
-
-      const passwordHash = await argon2.hash(initPassword, { type: argon2.argon2id });
-      const user = await tx.adminUser.create({
-        data: {
-          username,
-          passwordHash,
-          displayName: 'Administrator',
-          status: AdminUserStatus.active,
-          isDeleted: false,
+      const users = await tx.adminUser.findMany({
+        where: { isDeleted: false },
+        select: {
+          id: true,
+          username: true,
+          userRoles: {
+            include: {
+              role: {
+                select: {
+                  roleCode: true,
+                  isDeleted: true,
+                },
+              },
+            },
+          },
         },
       });
 
-      const superAdminRoleId = roles.get(BUILTIN_ROLE_CODES.superAdmin);
-      if (!superAdminRoleId) {
-        throw new Error('无法初始化 super_admin 角色');
+      if (users.length === 0) {
+        const username = normalizeUsername(process.env.ADMIN_INIT_USERNAME || 'admin');
+        const usernameError = this.validateUsername(username);
+        if (usernameError) {
+          throw new Error(`ADMIN_INIT_USERNAME 无效: ${usernameError}`);
+        }
+
+        const initPassword = String(process.env.ADMIN_INIT_PASSWORD ?? '').trim();
+        const passwordError = this.validatePassword(initPassword);
+        if (passwordError) {
+          throw new Error(`首次启动需要设置 ADMIN_INIT_PASSWORD: ${passwordError}`);
+        }
+
+        const passwordHash = await argon2.hash(initPassword, { type: argon2.argon2id });
+        const user = await tx.adminUser.create({
+          data: {
+            username,
+            passwordHash,
+            displayName: 'Administrator',
+            status: AdminUserStatus.active,
+            isDeleted: false,
+          },
+        });
+
+        await tx.adminUserRole.create({
+          data: {
+            userId: user.id,
+            roleId: adminRoleId,
+          },
+        });
+      } else {
+        const migratedUserIds: number[] = [];
+
+        for (const user of users) {
+          const activeRoleCodes = user.userRoles
+            .filter((item) => !item.role.isDeleted)
+            .map((item) => item.role.roleCode);
+          const normalizedRoleCodes = Array.from(new Set(activeRoleCodes.map((item) => normalizeRoleCode(item)).filter(Boolean)));
+          const targetRoleCode = user.username === 'surper1' || normalizedRoleCodes.includes(BUILTIN_ROLE_CODES.admin)
+            ? BUILTIN_ROLE_CODES.admin
+            : BUILTIN_ROLE_CODES.user;
+
+          if (activeRoleCodes.length === 1 && activeRoleCodes[0] === targetRoleCode) {
+            continue;
+          }
+
+          await tx.adminUserRole.deleteMany({ where: { userId: user.id } });
+          await tx.adminUserRole.create({
+            data: {
+              userId: user.id,
+              roleId: targetRoleCode === BUILTIN_ROLE_CODES.admin ? adminRoleId : userRoleId,
+            },
+          });
+          migratedUserIds.push(user.id);
+        }
+
+        if (migratedUserIds.length > 0) {
+          await tx.adminSession.deleteMany({
+            where: {
+              userId: { in: migratedUserIds },
+            },
+          });
+        }
       }
 
-      await tx.adminUserRole.create({
+      await tx.adminRole.updateMany({
+        where: {
+          roleCode: {
+            in: ['super_admin', 'analyst', 'operator'],
+          },
+          isDeleted: false,
+        },
         data: {
-          userId: user.id,
-          roleId: superAdminRoleId,
+          isDeleted: true,
+          deletedAt: new Date(),
         },
       });
     });
@@ -223,10 +286,19 @@ export class AuthService implements OnModuleInit {
     return null;
   }
 
+  private getAdminRegisterSecret(): string {
+    const configured = String(process.env.ADMIN_REGISTER_SECRET ?? '').trim();
+    return configured || DEFAULT_ADMIN_REGISTER_SECRET;
+  }
+
+  validateAdminRegisterSecret(secret: string | null | undefined): boolean {
+    return String(secret ?? '').trim() === this.getAdminRegisterSecret();
+  }
+
   private resolvePrimaryRole(roleCodes: string[]): string | null {
     const normalized = roleCodes.map((item) => normalizeRoleCode(item)).filter(Boolean);
-    if (normalized.includes(BUILTIN_ROLE_CODES.superAdmin)) {
-      return BUILTIN_ROLE_CODES.superAdmin;
+    if (normalized.includes(BUILTIN_ROLE_CODES.admin)) {
+      return BUILTIN_ROLE_CODES.admin;
     }
     return normalized[0] ?? null;
   }
@@ -247,7 +319,16 @@ export class AuthService implements OnModuleInit {
     const result: Partial<Record<RbacModuleCode, ModulePermission>> = {};
 
     for (const userRole of userRoles) {
-      for (const permission of userRole.role.permissions) {
+      const builtinPermissions = resolveBuiltinRolePermissions(userRole.role.roleCode);
+      const permissions = builtinPermissions
+        ? Object.entries(builtinPermissions).map(([moduleCode, permission]) => ({
+            moduleCode,
+            canRead: Boolean(permission?.canRead),
+            canWrite: Boolean(permission?.canWrite),
+          }))
+        : userRole.role.permissions;
+
+      for (const permission of permissions) {
         const moduleCode = normalizeModuleCode(permission.moduleCode);
         if (!moduleCode) {
           continue;
@@ -269,7 +350,7 @@ export class AuthService implements OnModuleInit {
       id: record.user.id,
       username: record.user.username,
       displayName: record.user.displayName,
-      roleCodes: record.user.userRoles.map((item) => normalizeRoleCode(item.role.roleCode)),
+      roleCodes: Array.from(new Set(record.user.userRoles.map((item) => normalizeRoleCode(item.role.roleCode)).filter(Boolean))),
       permissions: this.buildPermissions(record.user.userRoles),
     };
   }
@@ -301,6 +382,7 @@ export class AuthService implements OnModuleInit {
     username: string;
     password: string;
     displayName?: string;
+    accountType?: 'user' | 'admin';
   }): Promise<AuthenticatedUserContext> {
     const username = normalizeUsername(input.username);
     const usernameError = this.validateUsername(username);
@@ -317,9 +399,13 @@ export class AuthService implements OnModuleInit {
       throw error;
     }
 
-    const analystRoleId = await this.getActiveRoleIdByCode(BUILTIN_ROLE_CODES.analyst);
-    if (!analystRoleId) {
-      const error = new Error('系统未初始化 analyst 角色') as Error & { code?: string };
+    const accountType = input.accountType === 'admin' ? 'admin' : 'user';
+    const targetRoleCode = accountType === 'admin'
+      ? BUILTIN_ROLE_CODES.admin
+      : BUILTIN_ROLE_CODES.user;
+    const targetRoleId = await this.getActiveRoleIdByCode(targetRoleCode);
+    if (!targetRoleId) {
+      const error = new Error(`系统未初始化 ${targetRoleCode} 角色`) as Error & { code?: string };
       error.code = 'INTERNAL_ERROR';
       throw error;
     }
@@ -357,7 +443,7 @@ export class AuthService implements OnModuleInit {
       await tx.adminUserRole.create({
         data: {
           userId: created.id,
-          roleId: analystRoleId,
+          roleId: targetRoleId,
         },
       });
 

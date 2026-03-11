@@ -6,8 +6,8 @@ import { AnalysisTaskStatus, Prisma } from '@prisma/client';
 import { AgentExecutionMode, AgentRuntimeConfig, AgentRuntimeContext } from '@/common/agent/agent.types';
 import { AgentRunBridgeService } from '@/common/agent/agent-run-bridge.service';
 import { buildRuntimeConfigFromProfile, maskRuntimeConfig } from '@/common/agent/runtime-config.builder';
+import { AiRuntimeService } from '@/common/ai/ai-runtime.service';
 import { PrismaService } from '@/common/database/prisma.service';
-import { PersonalCryptoService } from '@/common/security/personal-crypto.service';
 import { safeJsonParse } from '@/common/utils/json';
 import { canonicalStockCode } from '@/common/utils/stock-code';
 import { BrokerAccountsService } from '@/modules/broker-accounts/broker-accounts.service';
@@ -38,6 +38,13 @@ interface RuntimeContext {
   runtimeConfig: AgentRuntimeConfig;
   maskedRuntimeConfig: AgentRuntimeConfig;
   accountName: string;
+  llmSource: 'system' | 'personal';
+  effectiveLlm: {
+    provider: string;
+    baseUrl: string;
+    model: string;
+    forwardRuntimeLlm: boolean;
+  };
 }
 
 export interface AnalysisBrokerMeta {
@@ -73,6 +80,10 @@ function asNumber(value: unknown): number | null {
   return n;
 }
 
+function asExecutionMode(value: unknown): AgentExecutionMode {
+  return String(value ?? '').trim().toLowerCase() === 'broker' ? 'broker' : 'paper';
+}
+
 function stageTitle(code: StageCode): string {
   if (code === 'data') return '数据获取 Agent';
   if (code === 'signal') return '信号策略 Agent';
@@ -85,7 +96,7 @@ export class AnalysisService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRunBridge: AgentRunBridgeService,
-    private readonly personalCrypto: PersonalCryptoService,
+    private readonly aiRuntimeService: AiRuntimeService,
     private readonly brokerAccountsService: BrokerAccountsService,
     private readonly tradingAccountService: TradingAccountService,
   ) {}
@@ -123,31 +134,8 @@ export class AnalysisService {
     };
   }
 
-  private shouldForwardRuntimeConfig(): boolean {
-    return (process.env.AGENT_FORWARD_RUNTIME_CONFIG ?? 'false').toLowerCase() === 'true';
-  }
-
   private isAutoOrderEnabled(): boolean {
     return (process.env.ANALYSIS_AUTO_ORDER_ENABLED ?? 'true').toLowerCase() === 'true';
-  }
-
-  private decryptProfileToken(profile: {
-    aiTokenCiphertext: string | null;
-    aiTokenIv: string | null;
-    aiTokenTag: string | null;
-  }): string | null {
-    if (!profile.aiTokenCiphertext) {
-      return null;
-    }
-    if (!profile.aiTokenIv || !profile.aiTokenTag) {
-      throw new Error('个人 AI Token 缺少加密元数据，无法下发到 Agent');
-    }
-
-    return this.personalCrypto.decrypt({
-      ciphertext: profile.aiTokenCiphertext,
-      iv: profile.aiTokenIv,
-      tag: profile.aiTokenTag,
-    });
   }
 
   async buildRuntimeContext(userId: number, options?: { includeApiToken?: boolean }): Promise<RuntimeContext> {
@@ -159,15 +147,32 @@ export class AnalysisService {
       }),
     ]);
 
-    const includeApiToken = Boolean(options?.includeApiToken);
-    const apiToken = includeApiToken && profile ? this.decryptProfileToken(profile) : null;
+    const resolvedLlm = await this.aiRuntimeService.resolveEffectiveLlmFromProfile(profile, {
+      includeApiToken: options?.includeApiToken ?? true,
+      requireSystemDefault: true,
+    });
     const runtimeConfig = buildRuntimeConfigFromProfile(profile, user?.username ?? `u${userId}`, {
-      apiToken,
+      llm: resolvedLlm.forwardRuntimeLlm
+        ? {
+            provider: resolvedLlm.effective.provider,
+            baseUrl: resolvedLlm.effective.baseUrl,
+            model: resolvedLlm.effective.model,
+            hasToken: resolvedLlm.source === 'personal' ? resolvedLlm.hasPersonalToken : resolvedLlm.hasSystemToken,
+            apiToken: resolvedLlm.apiToken,
+          }
+        : null,
     });
     return {
       runtimeConfig,
       maskedRuntimeConfig: maskRuntimeConfig(runtimeConfig),
       accountName: runtimeConfig.account.account_name,
+      llmSource: resolvedLlm.source,
+      effectiveLlm: {
+        provider: resolvedLlm.effective.provider,
+        baseUrl: resolvedLlm.effective.baseUrl,
+        model: resolvedLlm.effective.model,
+        forwardRuntimeLlm: resolvedLlm.forwardRuntimeLlm,
+      },
     };
   }
 
@@ -189,7 +194,7 @@ export class AnalysisService {
   private cloneRuntimeConfig(runtimeConfig: AgentRuntimeConfig): AgentRuntimeConfig {
     return {
       account: { ...runtimeConfig.account },
-      llm: { ...runtimeConfig.llm },
+      ...(runtimeConfig.llm ? { llm: { ...runtimeConfig.llm } } : {}),
       strategy: { ...runtimeConfig.strategy },
       execution: runtimeConfig.execution ? { ...runtimeConfig.execution } : undefined,
       context: runtimeConfig.context
@@ -242,21 +247,28 @@ export class AnalysisService {
     requestedModeInput?: string | null,
   ): Promise<AnalysisBrokerMeta> {
     const requestedMode = this.parseRequestedExecutionMode(requestedModeInput);
-    const access = await this.brokerAccountsService.resolveSimulationAccess(userId, { requireVerified: true });
     const autoOrderEnabled = requestedMode === 'auto' && this.isAutoOrderEnabled();
+    const access = requestedMode === 'auto' && autoOrderEnabled
+      ? await this.brokerAccountsService.resolveSimulationAccess(userId, { requireVerified: true })
+      : null;
+
     return {
-      execution_mode: 'paper',
+      execution_mode: requestedMode === 'auto' && autoOrderEnabled ? 'broker' : 'paper',
       requested_execution_mode: requestedMode,
-      broker_account_id: access.brokerAccountId,
+      broker_account_id: access?.brokerAccountId ?? null,
       auto_order_enabled: autoOrderEnabled,
-      broker_plan_reason: requestedMode === 'paper' ? 'paper_analysis_only' : 'auto_submit_backtrader_local',
+      broker_plan_reason: requestedMode === 'paper'
+        ? 'paper_analysis_only'
+        : autoOrderEnabled
+          ? 'agent_execute_backtrader_local'
+          : 'auto_order_disabled',
     };
   }
 
   resolveExecutionMetaFromPayload(requestPayload: unknown): AnalysisBrokerMeta {
     const payload = asRecord(requestPayload);
     const meta = asRecord(payload?.meta);
-    const executionMode: AgentExecutionMode = 'paper';
+    const executionMode = asExecutionMode(meta?.execution_mode);
     const requestedMode = this.parseRequestedExecutionMode(meta?.requested_execution_mode ?? meta?.execution_mode ?? 'auto');
     const brokerAccountId = asPositiveInt(meta?.broker_account_id);
     const autoOrderEnabled = Boolean(meta?.auto_order_enabled ?? (requestedMode === 'auto' ? this.isAutoOrderEnabled() : false));
@@ -279,7 +291,7 @@ export class AnalysisService {
     const brokerAccountId = asPositiveInt(executionMeta.broker_account_id);
 
     cloned.execution = {
-      mode: 'paper',
+      mode: executionMeta.execution_mode,
       has_ticket: false,
       ...(brokerAccountId ? { broker_account_id: brokerAccountId } : {}),
     };
@@ -294,15 +306,15 @@ export class AnalysisService {
     executionMode?: RequestedExecutionMode;
   }): Promise<Record<string, unknown>> {
     const runtime = await this.buildRuntimeContext(input.userId, {
-      includeApiToken: this.shouldForwardRuntimeConfig(),
+      includeApiToken: true,
     });
     const executionMeta = await this.resolveExecutionPlan(input.userId, input.executionMode);
     const runRequestId = randomUUID().replace(/-/g, '');
 
-    const runtimeConfig = await this.attachTradingRuntimeContext(
-      input.userId,
-      this.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta),
-    );
+    const runtimeConfigBase = this.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta);
+    const runtimeConfig = executionMeta.execution_mode === 'broker' && executionMeta.broker_account_id
+      ? await this.attachTradingRuntimeContext(input.userId, runtimeConfigBase)
+      : runtimeConfigBase;
 
     const bridgeResult = await this.agentRunBridge.runViaAsyncTask([input.stockCode], runRequestId, {
       accountName: runtime.accountName,
@@ -349,7 +361,9 @@ export class AnalysisService {
     userId: number;
     executionMode?: RequestedExecutionMode;
   }): Promise<Record<string, unknown>> {
-    const runtime = await this.buildRuntimeContext(input.userId);
+    const runtime = await this.buildRuntimeContext(input.userId, {
+      includeApiToken: true,
+    });
     const executionMeta = await this.resolveExecutionPlan(input.userId, input.executionMode);
     const maskedRuntime = maskRuntimeConfig(this.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta));
     const existing = await this.prisma.analysisTask.findFirst({
@@ -386,6 +400,10 @@ export class AnalysisService {
       data: {
         ownerUserId: input.userId,
         taskId,
+        rootTaskId: taskId,
+        retryOfTaskId: null,
+        attemptNo: 1,
+        priority: 100,
         stockCode: input.stockCode,
         reportType: input.reportType,
         status: AnalysisTaskStatus.pending,
@@ -441,6 +459,7 @@ export class AnalysisService {
       processing: 0,
       completed: 0,
       failed: 0,
+      cancelled: 0,
     };
 
     for (const count of counts) {
@@ -537,8 +556,21 @@ export class AnalysisService {
       return `风控边界：止损 ${String(stopLoss ?? '--')}，止盈 ${String(takeProfit ?? '--')}`;
     }
 
+    const state = String(payload.state ?? '').trim().toLowerCase();
     const action = String(payload.action ?? payload.order_action ?? payload.decision ?? '').trim();
-    return `执行建议：${action || '无明确指令'}`;
+    const executedVia = String(payload.executed_via ?? payload.executedVia ?? '').trim();
+    const tradedQty = asPositiveInt(payload.traded_qty ?? payload.tradedQty ?? payload.quantity);
+
+    if (state === 'failed') {
+      return `执行失败：${action || '无明确指令'}`;
+    }
+    if (state === 'skipped' || action === 'none') {
+      return `执行结果：未执行`;
+    }
+    if (executedVia === 'backtrader_internal' && tradedQty) {
+      return `执行结果：${action} ${tradedQty} 股（仿真成交）`;
+    }
+    return `执行结果：${action || '无明确指令'}`;
   }
 
   private pickStageIO(payload: Record<string, unknown> | null): { input: Record<string, unknown> | null; output: Record<string, unknown> | null } {

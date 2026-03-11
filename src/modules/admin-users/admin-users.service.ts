@@ -2,7 +2,13 @@ import { Injectable } from '@nestjs/common';
 import { AdminUserStatus, Prisma } from '@prisma/client';
 
 import { AuthService } from '@/modules/auth/auth.service';
-import { BUILTIN_ROLE_CODES, normalizeRoleCode, normalizeUsername } from '@/common/auth/rbac.constants';
+import {
+  BUILTIN_ROLE_CODES,
+  normalizeRoleCode,
+  normalizeUsername,
+  resolveBuiltinRoleName,
+  resolveStoredRoleCodes,
+} from '@/common/auth/rbac.constants';
 import { PrismaService } from '@/common/database/prisma.service';
 
 import {
@@ -43,20 +49,27 @@ export class AdminUsersService {
   ) {}
 
   private mapUser(row: UserWithRoles): Record<string, unknown> {
+    const roles = Array.from(new Map(
+      row.userRoles
+        .filter((item) => !item.role.isDeleted)
+        .map((item) => {
+          const roleCode = normalizeRoleCode(item.role.roleCode);
+          return [roleCode, {
+            id: item.role.id,
+            role_code: roleCode,
+            role_name: resolveBuiltinRoleName(roleCode) ?? item.role.roleName,
+            is_builtin: item.role.isBuiltin,
+          }];
+        }),
+    ).values());
+
     return {
       id: row.id,
       username: row.username,
       display_name: row.displayName,
       email: row.email,
       status: row.status,
-      roles: row.userRoles
-        .filter((item) => !item.role.isDeleted)
-        .map((item) => ({
-          id: item.role.id,
-          role_code: item.role.roleCode,
-          role_name: item.role.roleName,
-          is_builtin: item.role.isBuiltin,
-        })),
+      roles,
       created_at: row.createdAt.toISOString(),
       updated_at: row.updatedAt.toISOString(),
       last_login_at: row.lastLoginAt?.toISOString() ?? null,
@@ -84,13 +97,18 @@ export class AdminUsersService {
 
   private async resolveRoleIds(roleCodes: string[]): Promise<Array<{ id: number; roleCode: string }>> {
     const normalized = Array.from(new Set(roleCodes.map((item) => normalizeRoleCode(item)).filter(Boolean)));
-    if (normalized.length === 0) {
-      throw createServiceError('VALIDATION_ERROR', '至少需要一个角色');
+    if (normalized.length !== 1) {
+      throw createServiceError('VALIDATION_ERROR', '用户类型只能选择一个');
+    }
+
+    const [targetRoleCode] = normalized;
+    if (targetRoleCode !== BUILTIN_ROLE_CODES.admin && targetRoleCode !== BUILTIN_ROLE_CODES.user) {
+      throw createServiceError('VALIDATION_ERROR', '用户类型仅支持普通用户或管理员');
     }
 
     const roles = await this.prisma.adminRole.findMany({
       where: {
-        roleCode: { in: normalized },
+        roleCode: { in: [targetRoleCode] },
         isDeleted: false,
       },
       select: {
@@ -100,7 +118,7 @@ export class AdminUsersService {
     });
 
     const foundCodes = new Set(roles.map((item) => item.roleCode));
-    const missing = normalized.filter((code) => !foundCodes.has(code));
+    const missing = [targetRoleCode].filter((code) => !foundCodes.has(code));
     if (missing.length > 0) {
       throw createServiceError('VALIDATION_ERROR', `角色不存在: ${missing.join(', ')}`);
     }
@@ -108,7 +126,7 @@ export class AdminUsersService {
     return roles;
   }
 
-  private async countActiveSuperAdmins(tx: DbClient = this.prisma): Promise<number> {
+  private async countActiveAdmins(tx: DbClient = this.prisma): Promise<number> {
     return await tx.adminUser.count({
       where: {
         isDeleted: false,
@@ -116,7 +134,9 @@ export class AdminUsersService {
         userRoles: {
           some: {
             role: {
-              roleCode: BUILTIN_ROLE_CODES.superAdmin,
+              roleCode: {
+                in: resolveStoredRoleCodes(BUILTIN_ROLE_CODES.admin),
+              },
               isDeleted: false,
             },
           },
@@ -125,7 +145,7 @@ export class AdminUsersService {
     });
   }
 
-  private async ensureNotLastSuperAdmin(
+  private async ensureNotLastAdmin(
     user: UserWithRoles,
     options: {
       nextStatus: AdminUserStatus;
@@ -134,28 +154,28 @@ export class AdminUsersService {
     },
     tx: DbClient,
   ): Promise<void> {
-    const hasSuperRole = user.userRoles.some(
-      (item) => !item.role.isDeleted && item.role.roleCode === BUILTIN_ROLE_CODES.superAdmin,
+    const hasAdminRole = user.userRoles.some(
+      (item) => !item.role.isDeleted && normalizeRoleCode(item.role.roleCode) === BUILTIN_ROLE_CODES.admin,
     );
 
-    if (!hasSuperRole) {
+    if (!hasAdminRole) {
       return;
     }
 
     const nextRoleCodes = options.nextRoleCodes;
-    const willHaveSuperRole = nextRoleCodes
-      ? nextRoleCodes.map((item) => normalizeRoleCode(item)).includes(BUILTIN_ROLE_CODES.superAdmin)
-      : hasSuperRole;
+    const willHaveAdminRole = nextRoleCodes
+      ? nextRoleCodes.map((item) => normalizeRoleCode(item)).includes(BUILTIN_ROLE_CODES.admin)
+      : hasAdminRole;
 
     const willStayActive = !options.nextIsDeleted && options.nextStatus === AdminUserStatus.active;
 
-    if (willStayActive && willHaveSuperRole) {
+    if (willStayActive && willHaveAdminRole) {
       return;
     }
 
-    const activeSuperAdminCount = await this.countActiveSuperAdmins(tx);
-    if (activeSuperAdminCount <= 1) {
-      throw createServiceError('VALIDATION_ERROR', '不能禁用、删除或降级最后一个 super_admin 用户');
+    const activeAdminCount = await this.countActiveAdmins(tx);
+    if (activeAdminCount <= 1) {
+      throw createServiceError('VALIDATION_ERROR', '不能禁用、删除或降级最后一个管理员用户');
     }
   }
 
@@ -185,7 +205,9 @@ export class AdminUsersService {
       where.userRoles = {
         some: {
           role: {
-            roleCode,
+            roleCode: {
+              in: resolveStoredRoleCodes(roleCode),
+            },
             isDeleted: false,
           },
         },
@@ -289,7 +311,9 @@ export class AdminUsersService {
         ? AdminUserStatus.active
         : user.status;
 
-    const nextRoleCodes = input.role_codes ? input.role_codes.map((item) => normalizeRoleCode(item)) : null;
+    const nextRoleCodes = input.role_codes
+      ? Array.from(new Set(input.role_codes.map((item) => normalizeRoleCode(item)).filter(Boolean)))
+      : null;
 
     const username = input.username != null ? normalizeUsername(input.username) : null;
     if (username != null) {
@@ -308,7 +332,7 @@ export class AdminUsersService {
     const roleEntities = input.role_codes ? await this.resolveRoleIds(input.role_codes) : null;
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      await this.ensureNotLastSuperAdmin(
+      await this.ensureNotLastAdmin(
         user,
         {
           nextStatus,
@@ -362,7 +386,7 @@ export class AdminUsersService {
     const nextStatus = input.status === 'disabled' ? AdminUserStatus.disabled : AdminUserStatus.active;
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      await this.ensureNotLastSuperAdmin(
+      await this.ensureNotLastAdmin(
         user,
         {
           nextStatus,
@@ -412,7 +436,7 @@ export class AdminUsersService {
     const user = await this.loadUserOrThrow(id);
 
     await this.prisma.$transaction(async (tx) => {
-      await this.ensureNotLastSuperAdmin(
+      await this.ensureNotLastAdmin(
         user,
         {
           nextStatus: AdminUserStatus.disabled,

@@ -1,6 +1,7 @@
 import { Controller, Get, HttpException, HttpStatus, Param, Query, Req } from '@nestjs/common';
 import { Request } from 'express';
 
+import { BUILTIN_ROLE_CODES } from '@/common/auth/rbac.constants';
 import { HistoryService } from './history.service';
 
 @Controller('/api/v1/history')
@@ -15,7 +16,7 @@ export class HistoryController {
 
     return {
       userId: user.id,
-      includeAll: user.roleCodes.includes('super_admin'),
+      includeAll: user.roleCodes.includes(BUILTIN_ROLE_CODES.admin),
     };
   }
 

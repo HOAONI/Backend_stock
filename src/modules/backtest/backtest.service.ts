@@ -15,7 +15,13 @@ import {
   BACKTEST_STRATEGY_NAMES,
   BacktestStrategyCode,
   DEFAULT_BACKTEST_STRATEGY_CODES,
+  resolveLegacyBacktestStrategy,
 } from './backtest-strategy-strategies';
+import {
+  getBacktestStrategyTemplateName,
+  isBacktestStrategyTemplateCode,
+} from './backtest-strategy-templates';
+import { UserBacktestStrategyService } from './user-backtest-strategy.service';
 
 export const OVERALL_SENTINEL_CODE = '__overall__';
 
@@ -39,6 +45,16 @@ function toPrismaJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value ?? {})) as Prisma.InputJsonValue;
 }
 
+interface ServiceError extends Error {
+  code?: string;
+}
+
+function buildServiceError(code: string, message: string): ServiceError {
+  const error = new Error(message) as ServiceError;
+  error.code = code;
+  return error;
+}
+
 @Injectable()
 export class BacktestService {
   private readonly logger = new Logger(BacktestService.name);
@@ -46,6 +62,7 @@ export class BacktestService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly backtestAgentClient: BacktestAgentClientService,
+    private readonly userBacktestStrategyService: UserBacktestStrategyService,
   ) {}
 
   private toNumber(value: unknown): number | null {
@@ -242,6 +259,70 @@ export class BacktestService {
       return normalized;
     }
     return [...DEFAULT_BACKTEST_STRATEGY_CODES];
+  }
+
+  private normalizeSavedStrategyId(value: unknown): number | null {
+    const parsed = Math.trunc(Number(value));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  private normalizeSavedStrategyName(value: unknown): string | null {
+    const text = String(value ?? '').trim();
+    return text.length > 0 ? text.slice(0, 64) : null;
+  }
+
+  private resolveStoredStrategyMetadata(
+    storedStrategyCode: string,
+    savedStrategyName?: string | null,
+  ): { strategyCode: string; strategyName: string; templateCode: string; templateName: string } {
+    const rawCode = String(storedStrategyCode ?? '').trim();
+    const savedName = this.normalizeSavedStrategyName(savedStrategyName);
+
+    if (this.isStrategyCode(rawCode)) {
+      const resolved = resolveLegacyBacktestStrategy(rawCode);
+      return {
+        strategyCode: rawCode,
+        strategyName: savedName ?? BACKTEST_STRATEGY_NAMES[rawCode],
+        templateCode: resolved.templateCode,
+        templateName: getBacktestStrategyTemplateName(resolved.templateCode),
+      };
+    }
+
+    if (isBacktestStrategyTemplateCode(rawCode)) {
+      const templateName = getBacktestStrategyTemplateName(rawCode);
+      return {
+        strategyCode: rawCode,
+        strategyName: savedName ?? templateName,
+        templateCode: rawCode,
+        templateName,
+      };
+    }
+
+    return {
+      strategyCode: rawCode,
+      strategyName: savedName ?? rawCode,
+      templateCode: rawCode,
+      templateName: rawCode,
+    };
+  }
+
+  private buildStoredStrategyCodeCandidates(rawStrategyCode?: string): string[] {
+    const value = String(rawStrategyCode ?? '').trim();
+    if (!value) {
+      return [];
+    }
+
+    const candidates = new Set<string>([value]);
+    if (this.isStrategyCode(value)) {
+      candidates.add(resolveLegacyBacktestStrategy(value).templateCode);
+    }
+    if (value === 'ma_cross') {
+      candidates.add('ma20_trend');
+    }
+    if (value === 'rsi_threshold') {
+      candidates.add('rsi14_mean_reversion');
+    }
+    return [...candidates];
   }
 
   private parseDayText(value: unknown): Date | null {
@@ -1230,33 +1311,38 @@ export class BacktestService {
         end_date: this.toIsoDay(row.effectiveEndDate),
       },
       created_at: row.createdAt.toISOString(),
-      items: row.runs.map((run) => ({
-        run_id: run.id,
-        strategy_code: run.strategyCode,
-        strategy_name:
-          BACKTEST_STRATEGY_NAMES[run.strategyCode as BacktestStrategyCode] ?? String(run.strategyCode),
-        strategy_version: run.strategyVersion,
-        params: run.paramsJson ?? {},
-        metrics: run.metricsJson ?? {},
-        benchmark: run.benchmarkJson ?? {},
-        trades: run.trades.map((trade) => ({
-          entry_date: this.toIsoDay(trade.entryDate),
-          exit_date: this.toIsoDay(trade.exitDate),
-          entry_price: trade.entryPrice,
-          exit_price: trade.exitPrice,
-          qty: trade.qty,
-          gross_return_pct: trade.grossReturnPct,
-          net_return_pct: trade.netReturnPct,
-          fees: trade.fees,
-          exit_reason: trade.exitReason,
-        })),
-        equity: run.equityPoints.map((point) => ({
-          trade_date: this.toIsoDay(point.tradeDate),
-          equity: point.equity,
-          drawdown_pct: point.drawdownPct,
-          benchmark_equity: point.benchmarkEquity,
-        })),
-      })),
+      items: row.runs.map((run) => {
+        const metadata = this.resolveStoredStrategyMetadata(run.strategyCode, run.savedStrategyName);
+        return {
+          strategy_id: run.savedStrategyId ?? null,
+          run_id: run.id,
+          strategy_code: metadata.strategyCode,
+          strategy_name: metadata.strategyName,
+          template_code: metadata.templateCode,
+          template_name: metadata.templateName,
+          strategy_version: run.strategyVersion,
+          params: run.paramsJson ?? {},
+          metrics: run.metricsJson ?? {},
+          benchmark: run.benchmarkJson ?? {},
+          trades: run.trades.map((trade) => ({
+            entry_date: this.toIsoDay(trade.entryDate),
+            exit_date: this.toIsoDay(trade.exitDate),
+            entry_price: trade.entryPrice,
+            exit_price: trade.exitPrice,
+            qty: trade.qty,
+            gross_return_pct: trade.grossReturnPct,
+            net_return_pct: trade.netReturnPct,
+            fees: trade.fees,
+            exit_reason: trade.exitReason,
+          })),
+          equity: run.equityPoints.map((point) => ({
+            trade_date: this.toIsoDay(point.tradeDate),
+            equity: point.equity,
+            drawdown_pct: point.drawdownPct,
+            benchmark_equity: point.benchmarkEquity,
+          })),
+        };
+      }),
       legacy_event_backtest: false,
     };
   }
@@ -1265,6 +1351,7 @@ export class BacktestService {
     code: string;
     startDate: string;
     endDate: string;
+    strategyIds?: number[];
     strategyCodes?: string[];
     initialCapital?: number;
     commissionRate?: number;
@@ -1273,19 +1360,23 @@ export class BacktestService {
   }): Promise<Record<string, unknown>> {
     const code = String(input.code ?? '').trim();
     if (!code) {
-      throw new Error('code is required');
+      throw buildServiceError('VALIDATION_ERROR', 'code is required');
     }
 
     const startDate = this.parseDayText(input.startDate);
     const endDate = this.parseDayText(input.endDate);
     if (!startDate || !endDate) {
-      throw new Error('start_date and end_date are required');
+      throw buildServiceError('VALIDATION_ERROR', 'start_date and end_date are required');
     }
     if (startDate.getTime() > endDate.getTime()) {
-      throw new Error('start_date must be <= end_date');
+      throw buildServiceError('VALIDATION_ERROR', 'start_date must be <= end_date');
     }
 
-    const strategyCodes = this.normalizeStrategyCodes(input.strategyCodes);
+    const resolvedStrategies = await this.userBacktestStrategyService.resolveRunStrategies({
+      userId: input.requester.userId,
+      strategyIds: input.strategyIds,
+      strategyCodes: input.strategyCodes,
+    });
     const initialCapital = this.toNumber(input.initialCapital);
     const commissionRate = this.toNumber(input.commissionRate);
     const slippageBps = this.toNumber(input.slippageBps);
@@ -1294,7 +1385,12 @@ export class BacktestService {
       code,
       start_date: this.toIsoDay(startDate),
       end_date: this.toIsoDay(endDate),
-      strategy_codes: strategyCodes,
+      strategies: resolvedStrategies.map((strategy) => ({
+        strategy_id: strategy.strategyId,
+        strategy_name: strategy.strategyName,
+        template_code: strategy.templateCode,
+        params: strategy.params,
+      })),
       ...(initialCapital != null ? { initial_capital: initialCapital } : {}),
       ...(commissionRate != null ? { commission_rate: commissionRate } : {}),
       ...(slippageBps != null ? { slippage_bps: slippageBps } : {}),
@@ -1322,15 +1418,19 @@ export class BacktestService {
       });
 
       for (const item of items) {
-        const strategyCodeRaw = String(item.strategy_code ?? '').trim();
-        const strategyCode = this.isStrategyCode(strategyCodeRaw) ? strategyCodeRaw : null;
-        if (!strategyCode) {
+        const metadata = this.resolveStoredStrategyMetadata(
+          String(item.template_code ?? item.strategy_code ?? '').trim(),
+          this.normalizeSavedStrategyName(item.strategy_name),
+        );
+        if (!metadata.strategyCode) {
           continue;
         }
         const run = await tx.strategyBacktestRun.create({
           data: {
             runGroupId: group.id,
-            strategyCode,
+            savedStrategyId: this.normalizeSavedStrategyId(item.strategy_id),
+            savedStrategyName: metadata.strategyName,
+            strategyCode: metadata.templateCode,
             strategyVersion: String(item.strategy_version ?? 'v1'),
             paramsJson: toPrismaJson(asRecord(item.params)),
             metricsJson: toPrismaJson(asRecord(item.metrics)),
@@ -1400,7 +1500,7 @@ export class BacktestService {
   }): Promise<Record<string, unknown>> {
     const parsedStart = input.startDate ? this.parseDayText(input.startDate) : null;
     const parsedEnd = input.endDate ? this.parseDayText(input.endDate) : null;
-    const strategyCode = String(input.strategyCode ?? '').trim();
+    const strategyCodeCandidates = this.buildStoredStrategyCodeCandidates(input.strategyCode);
     const code = String(input.code ?? '').trim();
 
     const where: Prisma.StrategyBacktestRunGroupWhereInput = {
@@ -1408,11 +1508,13 @@ export class BacktestService {
       ...(code ? { code } : {}),
       ...(parsedStart ? { endDate: { gte: parsedStart } } : {}),
       ...(parsedEnd ? { startDate: { lte: parsedEnd } } : {}),
-      ...(this.isStrategyCode(strategyCode)
+      ...(strategyCodeCandidates.length > 0
         ? {
             runs: {
               some: {
-                strategyCode,
+                strategyCode: {
+                  in: strategyCodeCandidates,
+                },
               },
             },
           }
@@ -1427,6 +1529,8 @@ export class BacktestService {
           orderBy: [{ strategyCode: 'asc' }, { id: 'asc' }],
           select: {
             id: true,
+            savedStrategyId: true,
+            savedStrategyName: true,
             strategyCode: true,
             strategyVersion: true,
             metricsJson: true,
@@ -1455,14 +1559,19 @@ export class BacktestService {
           end_date: this.toIsoDay(row.effectiveEndDate),
         },
         created_at: row.createdAt.toISOString(),
-        strategies: row.runs.map((run) => ({
-          run_id: run.id,
-          strategy_code: run.strategyCode,
-          strategy_name:
-            BACKTEST_STRATEGY_NAMES[run.strategyCode as BacktestStrategyCode] ?? String(run.strategyCode),
-          strategy_version: run.strategyVersion,
-          metrics: run.metricsJson ?? {},
-        })),
+        strategies: row.runs.map((run) => {
+          const metadata = this.resolveStoredStrategyMetadata(run.strategyCode, run.savedStrategyName);
+          return {
+            strategy_id: run.savedStrategyId ?? null,
+            run_id: run.id,
+            strategy_code: metadata.strategyCode,
+            strategy_name: metadata.strategyName,
+            template_code: metadata.templateCode,
+            template_name: metadata.templateName,
+            strategy_version: run.strategyVersion,
+            metrics: run.metricsJson ?? {},
+          };
+        }),
       })),
       legacy_event_backtest: false,
     };

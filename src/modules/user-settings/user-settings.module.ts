@@ -1,14 +1,14 @@
 import { Module } from '@nestjs/common';
 
+import { AiRuntimeModule } from '@/common/ai/ai-runtime.module';
 import { PrismaModule } from '@/common/database/prisma.module';
-import { PersonalCryptoService } from '@/common/security/personal-crypto.service';
 
 import { UserSettingsController } from './user-settings.controller';
 import { UserSettingsService } from './user-settings.service';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, AiRuntimeModule],
   controllers: [UserSettingsController],
-  providers: [UserSettingsService, PersonalCryptoService],
+  providers: [UserSettingsService],
 })
 export class UserSettingsModule {}

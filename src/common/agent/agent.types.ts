@@ -1,4 +1,4 @@
-export type AgentExecutionMode = 'paper';
+export type AgentExecutionMode = 'paper' | 'broker';
 
 export interface AgentRuntimeExecutionConfig {
   mode: AgentExecutionMode;
@@ -18,7 +18,7 @@ export interface AgentRuntimeConfig {
     initial_cash: number;
     account_display_name?: string | null;
   };
-  llm: {
+  llm?: {
     provider: string;
     base_url: string;
     model: string;

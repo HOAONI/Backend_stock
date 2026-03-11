@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MinLength } from 'class-validator';
+import { IsIn, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class LoginRequestDto {
   @IsString()
@@ -39,4 +39,13 @@ export class RegisterRequestDto {
   @IsOptional()
   @IsString()
   displayName?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['user', 'admin'])
+  accountType?: 'user' | 'admin';
+
+  @IsOptional()
+  @IsString()
+  adminSecret?: string;
 }

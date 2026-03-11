@@ -38,8 +38,8 @@ export class AuthGuardMiddleware implements NestMiddleware {
       return false;
     }
 
-    if (user.roleCodes.includes(BUILTIN_ROLE_CODES.superAdmin)) {
-      return true;
+    if (user.roleCodes.includes(BUILTIN_ROLE_CODES.admin)) {
+      return moduleCode !== 'admin_role';
     }
 
     const modulePermission = user.permissions[moduleCode];

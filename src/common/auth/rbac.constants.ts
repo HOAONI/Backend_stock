@@ -49,17 +49,24 @@ export function resolveModuleCode(pathname: string): RbacModuleCode | null {
   return null;
 }
 
+const LEGACY_ROLE_CODE_ALIASES = {
+  super_admin: 'admin',
+  analyst: 'user',
+  operator: 'user',
+} as const;
+
 export const BUILTIN_ROLE_CODES = {
-  superAdmin: 'super_admin',
-  analyst: 'analyst',
-  operator: 'operator',
+  admin: 'admin',
+  user: 'user',
 } as const;
 
 export const BUILTIN_ROLE_PERMISSIONS: Record<string, Partial<Record<RbacModuleCode, ModulePermission>>> = {
-  [BUILTIN_ROLE_CODES.superAdmin]: Object.fromEntries(
-    RBAC_MODULE_CODES.map((moduleCode) => [moduleCode, { canRead: true, canWrite: true }]),
+  [BUILTIN_ROLE_CODES.admin]: Object.fromEntries(
+    RBAC_MODULE_CODES
+      .filter((moduleCode) => moduleCode !== 'admin_role')
+      .map((moduleCode) => [moduleCode, { canRead: true, canWrite: true }]),
   ) as Partial<Record<RbacModuleCode, ModulePermission>>,
-  [BUILTIN_ROLE_CODES.analyst]: {
+  [BUILTIN_ROLE_CODES.user]: {
     analysis: { canRead: true, canWrite: true },
     backtest: { canRead: true, canWrite: true },
     history: { canRead: true, canWrite: false },
@@ -67,25 +74,45 @@ export const BUILTIN_ROLE_PERMISSIONS: Record<string, Partial<Record<RbacModuleC
     user_settings: { canRead: true, canWrite: true },
     broker_account: { canRead: true, canWrite: true },
     trading_account: { canRead: true, canWrite: true },
-    admin_log: { canRead: true, canWrite: false },
-    auth: { canRead: true, canWrite: true },
-  },
-  [BUILTIN_ROLE_CODES.operator]: {
-    system_config: { canRead: true, canWrite: true },
-    user_settings: { canRead: true, canWrite: true },
-    broker_account: { canRead: true, canWrite: true },
-    trading_account: { canRead: true, canWrite: true },
-    analysis: { canRead: true, canWrite: false },
-    history: { canRead: true, canWrite: false },
-    stocks: { canRead: true, canWrite: false },
-    backtest: { canRead: true, canWrite: false },
-    admin_log: { canRead: true, canWrite: false },
     auth: { canRead: true, canWrite: true },
   },
 };
 
 export function normalizeRoleCode(value: string): string {
-  return String(value ?? '').trim().toLowerCase();
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return LEGACY_ROLE_CODE_ALIASES[normalized as keyof typeof LEGACY_ROLE_CODE_ALIASES] ?? normalized;
+}
+
+export function resolveStoredRoleCodes(roleCode: string): string[] {
+  const normalized = normalizeRoleCode(roleCode);
+  if (!normalized) {
+    return [];
+  }
+
+  if (normalized === BUILTIN_ROLE_CODES.admin) {
+    return ['admin', 'super_admin'];
+  }
+  if (normalized === BUILTIN_ROLE_CODES.user) {
+    return ['user', 'analyst', 'operator'];
+  }
+
+  return [normalized];
+}
+
+export function resolveBuiltinRoleName(roleCode: string): string | null {
+  const normalized = normalizeRoleCode(roleCode);
+  if (normalized === BUILTIN_ROLE_CODES.admin) {
+    return '管理员';
+  }
+  if (normalized === BUILTIN_ROLE_CODES.user) {
+    return '普通用户';
+  }
+  return null;
+}
+
+export function resolveBuiltinRolePermissions(roleCode: string): Partial<Record<RbacModuleCode, ModulePermission>> | null {
+  const normalized = normalizeRoleCode(roleCode);
+  return BUILTIN_ROLE_PERMISSIONS[normalized] ?? null;
 }
 
 export function normalizeUsername(value: string): string {

@@ -11,14 +11,26 @@ export function buildRuntimeConfigFromProfile(
   profile: Prisma.AdminUserProfileGetPayload<Record<string, never>> | null,
   username: string,
   options?: {
-    apiToken?: string | null;
+    llm?: {
+      provider?: string | null;
+      baseUrl?: string | null;
+      model?: string | null;
+      hasToken?: boolean;
+      apiToken?: string | null;
+    } | null;
   },
 ): AgentRuntimeConfig {
   const simulationAccountId = cleanText(profile?.simulationAccountId);
   const simulationAccountName = cleanText(profile?.simulationAccountName);
   const accountName = simulationAccountId || simulationAccountName || `user-${cleanText(username, 'unknown')}`;
-  const apiToken = cleanText(options?.apiToken);
-  const hasToken = Boolean(profile?.aiTokenCiphertext || apiToken);
+  const llm = options?.llm;
+  const apiToken = cleanText(llm?.apiToken);
+  const hasToken = Boolean(llm?.hasToken || apiToken);
+  const hasLlm = Boolean(
+    cleanText(llm?.provider)
+    && cleanText(llm?.baseUrl)
+    && cleanText(llm?.model),
+  );
 
   return {
     account: {
@@ -26,13 +38,17 @@ export function buildRuntimeConfigFromProfile(
       initial_cash: Number(profile?.simulationInitialCapital ?? 100000),
       account_display_name: simulationAccountName || null,
     },
-    llm: {
-      provider: cleanText(profile?.aiProvider, 'openai'),
-      base_url: cleanText(profile?.aiBaseUrl, 'https://api.openai.com/v1'),
-      model: cleanText(profile?.aiModel, 'gpt-4o-mini'),
-      has_token: hasToken,
-      ...(apiToken ? { api_token: apiToken } : {}),
-    },
+    ...(hasLlm
+      ? {
+          llm: {
+            provider: cleanText(llm?.provider),
+            base_url: cleanText(llm?.baseUrl),
+            model: cleanText(llm?.model),
+            has_token: hasToken,
+            ...(apiToken ? { api_token: apiToken } : {}),
+          },
+        }
+      : {}),
     strategy: {
       position_max_pct: Number(profile?.strategyPositionMaxPct ?? 30),
       stop_loss_pct: Number(profile?.strategyStopLossPct ?? 8),
@@ -50,12 +66,16 @@ export function maskRuntimeConfig(runtimeConfig: AgentRuntimeConfig): AgentRunti
     account: {
       ...runtimeConfig.account,
     },
-    llm: {
-      provider: runtimeConfig.llm.provider,
-      base_url: runtimeConfig.llm.base_url,
-      model: runtimeConfig.llm.model,
-      has_token: Boolean(runtimeConfig.llm.has_token || runtimeConfig.llm.api_token),
-    },
+    ...(runtimeConfig.llm
+      ? {
+          llm: {
+            provider: runtimeConfig.llm.provider,
+            base_url: runtimeConfig.llm.base_url,
+            model: runtimeConfig.llm.model,
+            has_token: Boolean(runtimeConfig.llm.has_token || runtimeConfig.llm.api_token),
+          },
+        }
+      : {}),
     strategy: {
       ...runtimeConfig.strategy,
     },

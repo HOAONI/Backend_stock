@@ -142,6 +142,7 @@ export class AuthController {
     const username = String(body.username ?? '').trim();
     const password = String(body.password ?? '').trim();
     const confirmPassword = String(body.confirmPassword ?? '').trim();
+    const accountType = body.accountType === 'admin' ? 'admin' : 'user';
     if (!username || !password) {
       res.status(HttpStatus.BAD_REQUEST).json({
         error: 'invalid_request',
@@ -156,6 +157,13 @@ export class AuthController {
       });
       return;
     }
+    if (accountType === 'admin' && !this.authService.validateAdminRegisterSecret(body.adminSecret)) {
+      res.status(HttpStatus.FORBIDDEN).json({
+        error: 'invalid_admin_secret',
+        message: '管理员专属密钥错误',
+      });
+      return;
+    }
 
     let user;
     try {
@@ -163,6 +171,7 @@ export class AuthController {
         username,
         password,
         displayName: body.displayName,
+        accountType,
       });
     } catch (error: unknown) {
       const err = error as Error & { code?: string };

@@ -147,4 +147,8 @@ export class BacktestAgentClientService {
   async strategyRun(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     return await this.post('/internal/v1/backtest/strategy/run', payload);
   }
+
+  async agentRun(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return await this.post('/internal/v1/backtest/agent/run', payload);
+  }
 }

@@ -12,6 +12,7 @@ import * as dotenv from 'dotenv';
 import { AppModule } from './app.module';
 import { STRATEGY_BACKTEST_SCHEMA_NOT_READY_MESSAGE, getBacktestStorageReadiness } from './common/backtest/backtest-storage-readiness';
 import { GlobalHttpExceptionFilter } from './common/errors/http-exception.filter';
+import { AgentBacktestWorkerService } from './common/worker/agent-backtest-worker.service';
 import { TaskWorkerService } from './common/worker/task-worker.service';
 
 function setupEnv(): void {
@@ -101,21 +102,21 @@ async function bootstrap(): Promise<void> {
   await app.listen(port, host);
   Logger.log(`Backend_stock listening on http://${host}:${port}`, 'Bootstrap');
 
-  let workerService: TaskWorkerService | null = null;
+  const workerServices: Array<{ start: () => Promise<void>; stop: () => void }> = [];
   if (runWorkerInApiProcess()) {
-    const embeddedWorker = app.get(TaskWorkerService);
-    workerService = embeddedWorker;
-    void embeddedWorker.start().catch((error: unknown) => {
-      const logger = new Logger('EmbeddedWorker');
-      logger.error(error instanceof Error ? error.stack : String(error));
+    workerServices.push(app.get(TaskWorkerService));
+    workerServices.push(app.get(AgentBacktestWorkerService));
+    workerServices.forEach((embeddedWorker) => {
+      void embeddedWorker.start().catch((error: unknown) => {
+        const logger = new Logger('EmbeddedWorker');
+        logger.error(error instanceof Error ? error.stack : String(error));
+      });
     });
     Logger.log('Embedded worker enabled in API process', 'Bootstrap');
   }
 
   const shutdown = async (): Promise<void> => {
-    if (workerService) {
-      workerService.stop();
-    }
+    workerServices.forEach(service => service.stop());
     await app.close();
   };
 

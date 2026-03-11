@@ -37,7 +37,16 @@ else
 fi
 
 pnpm prisma:generate
-pnpm db:push
+if [ "${DB_INIT_USE_DB_PUSH:-false}" = "true" ]; then
+  pnpm db:push
+else
+  if ! pnpm prisma:deploy; then
+    echo "prisma migrate deploy failed."
+    echo "If this database was previously initialized via db push, resolve the baseline first:"
+    echo "pnpm exec prisma migrate resolve --applied 20260305074500_baseline"
+    exit 1
+  fi
+fi
 pnpm db:constraints
 
 echo "Database ready: ${DATABASE_URL}"

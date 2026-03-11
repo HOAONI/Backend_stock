@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsEmail,
@@ -12,6 +13,10 @@ import {
   MinLength,
 } from 'class-validator';
 
+import { BUILTIN_ROLE_CODES } from '@/common/auth/rbac.constants';
+
+const ADMIN_USER_ROLE_CODES = [BUILTIN_ROLE_CODES.admin, BUILTIN_ROLE_CODES.user] as const;
+
 export class ListAdminUsersQueryDto {
   @IsOptional()
   @IsString()
@@ -22,8 +27,8 @@ export class ListAdminUsersQueryDto {
   status?: 'active' | 'disabled';
 
   @IsOptional()
-  @IsString()
-  role_code?: string;
+  @IsIn(ADMIN_USER_ROLE_CODES)
+  role_code?: (typeof ADMIN_USER_ROLE_CODES)[number];
 
   @IsOptional()
   @Type(() => Number)
@@ -62,7 +67,8 @@ export class CreateAdminUserDto {
 
   @IsArray()
   @ArrayMinSize(1)
-  @IsString({ each: true })
+  @ArrayMaxSize(1)
+  @IsIn(ADMIN_USER_ROLE_CODES, { each: true })
   role_codes!: string[];
 }
 
@@ -87,7 +93,8 @@ export class UpdateAdminUserDto {
   @IsOptional()
   @IsArray()
   @ArrayMinSize(1)
-  @IsString({ each: true })
+  @ArrayMaxSize(1)
+  @IsIn(ADMIN_USER_ROLE_CODES, { each: true })
   role_codes?: string[];
 }
 

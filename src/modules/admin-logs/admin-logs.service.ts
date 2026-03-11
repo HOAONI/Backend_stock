@@ -3,6 +3,11 @@ import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '@/common/database/prisma.service';
 
+import {
+  buildAdminLogEventView,
+  collectAdminLogTargetUserIds,
+  matchesAdminLogKeyword,
+} from './admin-log-event.util';
 import { ListAdminLogsQueryDto } from './admin-logs.dto';
 
 interface ServiceError extends Error {
@@ -42,14 +47,23 @@ function parseDateEnd(value: string): Date {
   return new Date(value);
 }
 
+type AdminAuditLogRow = Prisma.AdminAuditLogGetPayload<{
+  include: {
+    user: {
+      select: {
+        id: true;
+        username: true;
+        displayName: true;
+      };
+    };
+  };
+}>;
+
 @Injectable()
 export class AdminLogsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list(query: ListAdminLogsQueryDto, scope: { userId: number; includeAll: boolean }): Promise<Record<string, unknown>> {
-    const page = Number.isFinite(query.page) ? Math.max(1, Number(query.page)) : 1;
-    const limit = Number.isFinite(query.limit) ? Math.min(Math.max(1, Number(query.limit)), 200) : 20;
-
+  private buildBaseWhere(query: ListAdminLogsQueryDto, scope: { userId: number; includeAll: boolean }): Prisma.AdminAuditLogWhereInput {
     const where: Prisma.AdminAuditLogWhereInput = {};
 
     if (!scope.includeAll) {
@@ -87,21 +101,80 @@ export class AdminLogsService {
       where.createdAt = createdAt;
     }
 
-    const keyword = String(query.keyword ?? '').trim();
-    if (keyword) {
-      where.OR = [
-        { usernameSnapshot: { contains: keyword, mode: 'insensitive' } },
-        { path: { contains: keyword, mode: 'insensitive' } },
-      ];
+    return where;
+  }
+
+  private async loadTargetUserLabels(rows: AdminAuditLogRow[]): Promise<Map<number, string>> {
+    const targetIds = collectAdminLogTargetUserIds(rows.map(row => row.path));
+    if (targetIds.length === 0) {
+      return new Map<number, string>();
     }
 
-    const [total, rows] = await this.prisma.$transaction([
-      this.prisma.adminAuditLog.count({ where }),
-      this.prisma.adminAuditLog.findMany({
+    const users = await this.prisma.adminUser.findMany({
+      where: {
+        id: { in: targetIds },
+      },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+      },
+    });
+
+    return new Map(
+      users.map((user) => [
+        user.id,
+        user.displayName?.trim() || user.username,
+      ]),
+    );
+  }
+
+  private async buildEventRows(rows: AdminAuditLogRow[]) {
+    const targetUserLabels = await this.loadTargetUserLabels(rows);
+
+    return rows.map((row) => {
+      const queryMasked = parseMaybeJson(row.queryMaskedJson);
+      const bodyMasked = parseMaybeJson(row.bodyMaskedJson);
+      const responseMasked = parseMaybeJson(row.responseMaskedJson);
+      const event = buildAdminLogEventView({
+        userId: row.userId,
+        usernameSnapshot: row.usernameSnapshot,
+        method: row.method,
+        path: row.path,
+        moduleCode: row.moduleCode,
+        action: row.action,
+        success: row.success,
+        queryMasked,
+        bodyMasked,
+        responseMasked,
+        user: row.user,
+      }, {
+        adminUserLabels: targetUserLabels,
+      });
+
+      return {
+        row,
+        queryMasked,
+        bodyMasked,
+        responseMasked,
+        event,
+      };
+    });
+  }
+
+  async list(query: ListAdminLogsQueryDto, scope: { userId: number; includeAll: boolean }): Promise<Record<string, unknown>> {
+    const page = Number.isFinite(query.page) ? Math.max(1, Number(query.page)) : 1;
+    const limit = Number.isFinite(query.limit) ? Math.min(Math.max(1, Number(query.limit)), 200) : 20;
+    const keyword = String(query.keyword ?? '').trim();
+    const where = this.buildBaseWhere(query, scope);
+
+    let total = 0;
+    let eventRows: Awaited<ReturnType<AdminLogsService['buildEventRows']>> = [];
+
+    if (keyword) {
+      const allRows = await this.prisma.adminAuditLog.findMany({
         where,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        skip: (page - 1) * limit,
-        take: limit,
         include: {
           user: {
             select: {
@@ -111,18 +184,45 @@ export class AdminLogsService {
             },
           },
         },
-      }),
-    ]);
+      });
+
+      const enrichedRows = await this.buildEventRows(allRows);
+      const filteredRows = enrichedRows.filter(item => matchesAdminLogKeyword(item.event, keyword, item.row.path));
+      total = filteredRows.length;
+      eventRows = filteredRows.slice((page - 1) * limit, page * limit);
+    } else {
+      const [count, rows] = await this.prisma.$transaction([
+        this.prisma.adminAuditLog.count({ where }),
+        this.prisma.adminAuditLog.findMany({
+          where,
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          skip: (page - 1) * limit,
+          take: limit,
+          include: {
+            user: {
+              select: {
+                id: true,
+                username: true,
+                displayName: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+      total = count;
+      eventRows = await this.buildEventRows(rows);
+    }
 
     return {
       total,
       page,
       limit,
-      items: rows.map((row) => ({
+      items: eventRows.map(({ row, event }) => ({
         id: row.id,
         request_id: row.requestId,
         user_id: row.userId,
-        username: row.user?.username ?? row.usernameSnapshot,
+        username: event.username,
         display_name: row.user?.displayName ?? null,
         method: row.method,
         path: row.path,
@@ -133,6 +233,11 @@ export class AdminLogsService {
         duration_ms: row.durationMs,
         error_code: row.errorCode,
         created_at: row.createdAt.toISOString(),
+        event_type: event.eventType,
+        event_summary: event.eventSummary,
+        module_label: event.moduleLabel,
+        result_label: event.resultLabel,
+        target_label: event.targetLabel,
       })),
     };
   }
@@ -158,11 +263,13 @@ export class AdminLogsService {
       throw createServiceError('NOT_FOUND', `日志 ${id} 不存在`);
     }
 
+    const [eventRow] = await this.buildEventRows([row]);
+
     return {
       id: row.id,
       request_id: row.requestId,
       user_id: row.userId,
-      username: row.user?.username ?? row.usernameSnapshot,
+      username: eventRow.event.username,
       display_name: row.user?.displayName ?? null,
       method: row.method,
       path: row.path,
@@ -173,11 +280,16 @@ export class AdminLogsService {
       duration_ms: row.durationMs,
       ip: row.ip,
       user_agent: row.userAgent,
-      query_masked: parseMaybeJson(row.queryMaskedJson),
-      body_masked: parseMaybeJson(row.bodyMaskedJson),
-      response_masked: parseMaybeJson(row.responseMaskedJson),
+      query_masked: eventRow.queryMasked,
+      body_masked: eventRow.bodyMasked,
+      response_masked: eventRow.responseMasked,
       error_code: row.errorCode,
       created_at: row.createdAt.toISOString(),
+      event_type: eventRow.event.eventType,
+      event_summary: eventRow.event.eventSummary,
+      module_label: eventRow.event.moduleLabel,
+      result_label: eventRow.event.resultLabel,
+      target_label: eventRow.event.targetLabel,
     };
   }
 }
