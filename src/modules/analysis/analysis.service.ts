@@ -489,6 +489,9 @@ export class AnalysisService {
       total: stats.total,
       pending: stats.pending,
       processing: stats.processing,
+      completed: stats.completed,
+      failed: stats.failed,
+      cancelled: stats.cancelled,
       tasks,
     };
   }

@@ -8,6 +8,13 @@ export interface EncryptedPayload {
   tag: string;
 }
 
+export interface PersonalSecretStatus {
+  available: boolean;
+  issue: string;
+}
+
+const PERSONAL_SECRET_KEY_SETUP_HINT = '请在 Backend_stock/.env 中配置有效的 PERSONAL_SECRET_KEY 后重启后端，可使用 openssl rand -hex 32 生成。';
+
 function decodeSecret(secret: string): Buffer {
   const text = secret.trim();
   if (!text) {
@@ -23,9 +30,44 @@ function decodeSecret(secret: string): Buffer {
   return raw;
 }
 
+export function getPersonalSecretStatus(secret = String(process.env.PERSONAL_SECRET_KEY ?? '')): PersonalSecretStatus {
+  const text = secret.trim();
+  if (!text) {
+    return {
+      available: false,
+      issue: `后端尚未配置 PERSONAL_SECRET_KEY，${PERSONAL_SECRET_KEY_SETUP_HINT}`,
+    };
+  }
+
+  try {
+    decodeSecret(text);
+    return {
+      available: true,
+      issue: '',
+    };
+  } catch {
+    return {
+      available: false,
+      issue: `后端的 PERSONAL_SECRET_KEY 格式无效，需为 32 字节的 hex 或 base64。${PERSONAL_SECRET_KEY_SETUP_HINT}`,
+    };
+  }
+}
+
 @Injectable()
 export class PersonalCryptoService {
+  getStatus(): PersonalSecretStatus {
+    return getPersonalSecretStatus();
+  }
+
+  assertAvailable(): void {
+    const status = this.getStatus();
+    if (!status.available) {
+      throw new Error(status.issue);
+    }
+  }
+
   private getKey(): Buffer {
+    this.assertAvailable();
     return decodeSecret(String(process.env.PERSONAL_SECRET_KEY ?? ''));
   }
 

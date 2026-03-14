@@ -72,6 +72,7 @@ SIMULATION_BIND_BROKER_CODE=backtrader_local
 SIM_PROVIDER_DEFAULT_CODE=backtrader_local
 BROKER_SNAPSHOT_CACHE_TTL_MS=60000
 BROKER_SECRET_KEY=
+PERSONAL_SECRET_KEY=
 
 # Auto order risk controls
 ANALYSIS_AUTO_ORDER_ENABLED=true
@@ -94,6 +95,7 @@ ADMIN_INIT_PASSWORD=
 ```
 
 `ADMIN_REGISTER_SECRET` 用于“管理员注册”时的专属密钥校验；未配置时后端默认回退到 `123123`。
+`PERSONAL_SECRET_KEY` 用于加密用户个人 AI API Key，未配置时 SiliconFlow / OpenAI / DeepSeek 的个人绑定都会失败；可使用 `openssl rand -hex 32` 生成。
 
 ## API 基础信息
 

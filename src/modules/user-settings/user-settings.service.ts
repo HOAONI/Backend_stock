@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 
-import { AiRuntimeService } from '@/common/ai/ai-runtime.service';
+import { AiRuntimeService, DEFAULT_SILICONFLOW_BASE_URL, DEFAULT_SILICONFLOW_MODEL } from '@/common/ai/ai-runtime.service';
 import { PrismaService } from '@/common/database/prisma.service';
-import { PersonalCryptoService } from '@/common/security/personal-crypto.service';
+import { PersonalCryptoService, PersonalSecretStatus } from '@/common/security/personal-crypto.service';
 
 import { UpdateUserSettingsDto } from './user-settings.dto';
 
@@ -19,6 +19,10 @@ function createServiceError(code: string, message: string): ServiceError {
 const MASKED_TOKEN = '******';
 const DEFAULT_PERSONAL_PROVIDER = 'deepseek';
 
+function cleanText(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
 function truncateText(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
     return value;
@@ -34,6 +38,10 @@ export class UserSettingsService {
     private readonly aiRuntimeService: AiRuntimeService,
   ) {}
 
+  private getPersonalBindingStatus(): PersonalSecretStatus {
+    return this.personalCrypto.getStatus();
+  }
+
   private async ensureProfile(userId: number) {
     return this.prisma.adminUserProfile.upsert({
       where: { userId },
@@ -42,11 +50,19 @@ export class UserSettingsService {
     });
   }
 
+  private resolveStoredPersonalModel(profile: Awaited<ReturnType<typeof this.ensureProfile>>): string {
+    if (cleanText(profile.aiProvider).toLowerCase() !== 'siliconflow') {
+      return '';
+    }
+    return cleanText(profile.aiModel) || DEFAULT_SILICONFLOW_MODEL;
+  }
+
   private async toPayload(profile: Awaited<ReturnType<typeof this.ensureProfile>>): Promise<Record<string, unknown>> {
     const resolvedLlm = await this.aiRuntimeService.resolveEffectiveLlmFromProfile(profile, {
       includeApiToken: false,
       requireSystemDefault: false,
     });
+    const personalBindingStatus = this.getPersonalBindingStatus();
 
     return {
       simulation: {
@@ -57,6 +73,7 @@ export class UserSettingsService {
       },
       ai: {
         personalProvider: resolvedLlm.personalProvider,
+        personalModel: this.resolveStoredPersonalModel(profile),
         provider: resolvedLlm.effective.provider || '',
         baseUrl: resolvedLlm.effective.baseUrl,
         model: resolvedLlm.effective.model,
@@ -65,6 +82,8 @@ export class UserSettingsService {
         source: resolvedLlm.source,
         hasSystemToken: resolvedLlm.hasSystemToken,
         requiresProviderReselection: resolvedLlm.requiresProviderReselection,
+        personalBindingAvailable: personalBindingStatus.available,
+        personalBindingIssue: personalBindingStatus.issue,
         systemDefault: {
           provider: resolvedLlm.systemDefault.provider,
           baseUrl: resolvedLlm.systemDefault.baseUrl,
@@ -103,6 +122,9 @@ export class UserSettingsService {
     let aiTokenTag: string | null | undefined;
     const providerChanged = ai?.provider != null && ai.provider !== existing.aiProvider;
     const apiTokenProvided = Boolean(ai && Object.prototype.hasOwnProperty.call(ai, 'apiToken'));
+    const siliconFlowModel = ai?.provider === 'siliconflow'
+      ? truncateText(cleanText(ai.model) || DEFAULT_SILICONFLOW_MODEL, 128)
+      : '';
 
     if (providerChanged && existing.aiTokenCiphertext && (!apiTokenProvided || ai?.apiToken === MASKED_TOKEN)) {
       throw createServiceError('VALIDATION_ERROR', '切换提供商时请重新输入对应 API Key');
@@ -115,13 +137,21 @@ export class UserSettingsService {
         aiTokenIv = null;
         aiTokenTag = null;
       } else if (apiToken !== MASKED_TOKEN) {
+        const personalBindingStatus = this.getPersonalBindingStatus();
+        if (!personalBindingStatus.available) {
+          throw createServiceError('VALIDATION_ERROR', personalBindingStatus.issue);
+        }
+
         try {
           const encrypted = this.personalCrypto.encrypt(apiToken.trim());
           aiTokenCiphertext = encrypted.ciphertext;
           aiTokenIv = encrypted.iv;
           aiTokenTag = encrypted.tag;
         } catch (error: unknown) {
-          const message = (error as Error).message || '个人 Token 加密失败';
+          const latestStatus = this.getPersonalBindingStatus();
+          const message = latestStatus.available
+            ? ((error as Error).message || '个人 Token 加密失败')
+            : latestStatus.issue;
           throw createServiceError('VALIDATION_ERROR', message);
         }
       }
@@ -135,8 +165,16 @@ export class UserSettingsService {
         simulationInitialCapital: simulation?.initialCapital ?? undefined,
         simulationNote: simulation?.note != null ? truncateText(simulation.note.trim(), 255) : undefined,
         aiProvider: ai?.provider ?? undefined,
-        aiBaseUrl: ai?.provider != null ? '' : undefined,
-        aiModel: ai?.provider != null ? '' : undefined,
+        aiBaseUrl: ai?.provider === 'siliconflow'
+          ? DEFAULT_SILICONFLOW_BASE_URL
+          : ai?.provider != null
+            ? ''
+            : undefined,
+        aiModel: ai?.provider === 'siliconflow'
+          ? siliconFlowModel
+          : ai?.provider != null
+            ? ''
+            : undefined,
         aiTokenCiphertext,
         aiTokenIv,
         aiTokenTag,

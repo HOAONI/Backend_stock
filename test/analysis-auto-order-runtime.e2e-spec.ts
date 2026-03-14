@@ -147,6 +147,82 @@ describe('Runtime config forwarding and auto-order guards', () => {
       expect(((options.runtimeConfig as Record<string, unknown>).execution as Record<string, unknown>).mode).toBe('broker');
     });
 
+    it('maps SiliconFlow personal runtime to custom provider before forwarding to Agent', async () => {
+      const prisma = {
+        adminUserProfile: {
+          findUnique: jest.fn(async () => null),
+        },
+        adminUser: {
+          findUnique: jest.fn(async () => ({ username: 'tester' })),
+        },
+        $transaction: jest.fn(async (queries: Array<Promise<unknown>>) => Promise.all(queries)),
+        analysisHistory: { create: jest.fn(async () => ({})) },
+      } as any;
+      const agentRunBridge = {
+        runViaAsyncTask: jest.fn(async () => ({
+          run: {},
+          bridgeMeta: {
+            agent_task_id: 't1',
+            agent_run_id: 'r1',
+            poll_attempts: 0,
+            last_agent_status: 'completed',
+            bridge_error_code: null,
+          },
+        })),
+      } as any;
+      const brokerAccountsService = {
+        resolveSimulationAccess: jest.fn(async () => ({ brokerAccountId: 3 })),
+      } as any;
+      const aiRuntimeService = createAiRuntimeService({
+        personalProvider: 'siliconflow',
+        effective: {
+          provider: 'siliconflow',
+          baseUrl: 'https://api.siliconflow.cn/v1',
+          model: 'Qwen/Qwen3-32B',
+        },
+      });
+      const tradingAccountService = {
+        getRuntimeContext: jest.fn(async () => ({
+          broker_account_id: 3,
+          broker_code: 'backtrader_local',
+          provider_code: 'backtrader_local',
+          provider_name: 'Backtrader Local Sim',
+          account_uid: 'bt-3',
+          account_display_name: '测试账户',
+          snapshot_at: new Date().toISOString(),
+          data_source: 'upstream',
+          summary: {
+            cash: 6507.96,
+            total_market_value: 93464,
+            total_asset: 99971.96,
+          },
+          positions: [],
+        })),
+      } as any;
+
+      const service = new AnalysisService(
+        prisma,
+        agentRunBridge,
+        aiRuntimeService as any,
+        brokerAccountsService,
+        tradingAccountService,
+      );
+
+      await service.runSync({
+        stockCode: '600121',
+        reportType: 'detailed',
+        userId: 1,
+        executionMode: 'auto',
+      });
+
+      const options = (agentRunBridge.runViaAsyncTask as jest.Mock).mock.calls[0]?.[2] as Record<string, unknown>;
+      const llm = (options.runtimeConfig as Record<string, unknown>).llm as Record<string, unknown>;
+      expect(llm.provider).toBe('custom');
+      expect(llm.base_url).toBe('https://api.siliconflow.cn/v1');
+      expect(llm.model).toBe('Qwen/Qwen3-32B');
+      expect(llm.api_token).toBe('personal-token-xyz');
+    });
+
     it('keeps paper mode account-agnostic and does not require broker runtime context', async () => {
       const prisma = {
         adminUserProfile: {

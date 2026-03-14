@@ -4,6 +4,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
 import { BacktestAgentClientService } from '@/common/agent/backtest-agent-client.service';
+import { AiRuntimeService } from '@/common/ai/ai-runtime.service';
 import {
   AGENT_BACKTEST_SCHEMA_NOT_READY_MESSAGE,
   getAgentBacktestStorageReadiness,
@@ -64,6 +65,13 @@ type AgentBacktestConfigRow = {
   runtime_llm_source: 'system' | 'personal';
 };
 
+type AgentBacktestLlmMeta = {
+  source: 'system' | 'personal';
+  provider: string;
+  base_url: string;
+  model: string;
+};
+
 type AgentBacktestGroupRow = {
   id: number;
   owner_user_id: number | null;
@@ -95,6 +103,24 @@ type TxClient = Prisma.TransactionClient;
 const ENGINE_VERSION = 'agent_replay_v1';
 const SIGNAL_PROFILE_VERSION = 'agent_signal_profile_v1';
 const SNAPSHOT_VERSION = 1;
+const PERSONAL_REFINE_RUNTIME_MISSING_MESSAGE = '为避免静默回退到系统 AI，本次精修已终止，请重新绑定个人 AI 后重新发起回放回测';
+const DEFAULT_AGENT_BACKTEST_CONFIG_ROW: AgentBacktestConfigRow = {
+  initial_capital: 100000,
+  commission_rate: 0.0003,
+  slippage_bps: 2,
+  enable_refine: true,
+  runtime_strategy: { position_max_pct: 30, stop_loss_pct: 8, take_profit_pct: 15 },
+  signal_profile_hash: '',
+  signal_profile_version: SIGNAL_PROFILE_VERSION,
+  snapshot_version: SNAPSHOT_VERSION,
+  runtime_llm: {
+    provider: 'openai',
+    base_url: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
+    has_token: false,
+  },
+  runtime_llm_source: 'system',
+};
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -129,6 +155,14 @@ function sanitizeRuntimeLlm(runtimeLlm: AgentRuntimeLlm): AgentRuntimeLlm {
   };
 }
 
+function mapAgentRuntimeProvider(provider: unknown): string {
+  const normalized = String(provider ?? '').trim().toLowerCase();
+  if (normalized === 'siliconflow') {
+    return 'custom';
+  }
+  return normalized;
+}
+
 function createSchemaNotReadyError(tableName: string): Error & {
   code: string;
   meta: { table: string };
@@ -150,6 +184,7 @@ export class AgentBacktestService {
     private readonly prisma: PrismaService,
     private readonly backtestAgentClient: BacktestAgentClientService,
     private readonly analysisService: AnalysisService,
+    private readonly aiRuntimeService: AiRuntimeService = {} as AiRuntimeService,
   ) {}
 
   private async assertStorageReady(): Promise<void> {
@@ -240,6 +275,105 @@ export class AgentBacktestService {
 
   private stableHash(value: unknown): string {
     return crypto.createHash('sha1').update(safeJsonStringify(value)).digest('hex');
+  }
+
+  private parseConfigRow(configJson: unknown): AgentBacktestConfigRow {
+    return safeJsonParse<AgentBacktestConfigRow>(
+      typeof configJson === 'string' ? configJson : safeJsonStringify(configJson),
+      DEFAULT_AGENT_BACKTEST_CONFIG_ROW,
+    );
+  }
+
+  private buildPublicLlmMeta(config: AgentBacktestConfigRow): AgentBacktestLlmMeta | null {
+    const provider = String(config.runtime_llm?.provider ?? '').trim();
+    const baseUrl = String(config.runtime_llm?.base_url ?? '').trim();
+    const model = String(config.runtime_llm?.model ?? '').trim();
+    if (!provider && !baseUrl && !model) {
+      return null;
+    }
+
+    return {
+      source: config.runtime_llm_source === 'personal' ? 'personal' : 'system',
+      provider,
+      base_url: baseUrl,
+      model,
+    };
+  }
+
+  private toRuntimeLlmPayload(input: {
+    provider: string;
+    baseUrl: string;
+    model: string;
+    hasToken: boolean;
+    apiToken?: string | null;
+  }): AgentRuntimeLlm | null {
+    const provider = mapAgentRuntimeProvider(input.provider);
+    const baseUrl = String(input.baseUrl ?? '').trim();
+    const model = String(input.model ?? '').trim();
+    const apiToken = String(input.apiToken ?? '').trim();
+    if (!provider || !baseUrl || !model) {
+      return null;
+    }
+
+    return {
+      provider,
+      base_url: baseUrl,
+      model,
+      has_token: Boolean(input.hasToken || apiToken),
+      ...(apiToken ? { api_token: apiToken } : {}),
+    };
+  }
+
+  private async resolveRefineRuntimeLlmPayload(
+    userId: number,
+    source: 'system' | 'personal',
+  ): Promise<AgentRuntimeLlm | null> {
+    const profile = await this.prisma.adminUserProfile.findUnique({ where: { userId } });
+
+    if (source === 'personal') {
+      const resolved = await this.aiRuntimeService.resolveEffectiveLlmFromProfile(profile, {
+        includeApiToken: true,
+        requireSystemDefault: true,
+      });
+      if (resolved.source !== 'personal') {
+        return null;
+      }
+
+      return this.toRuntimeLlmPayload({
+        provider: resolved.effective.provider,
+        baseUrl: resolved.effective.baseUrl,
+        model: resolved.effective.model,
+        hasToken: resolved.hasPersonalToken,
+        apiToken: resolved.apiToken,
+      });
+    }
+
+    const strippedProfile = profile
+      ? {
+          ...profile,
+          aiProvider: '',
+          aiBaseUrl: '',
+          aiModel: '',
+          aiTokenCiphertext: null,
+          aiTokenIv: null,
+          aiTokenTag: null,
+        }
+      : null;
+    const resolved = await this.aiRuntimeService.resolveEffectiveLlmFromProfile(strippedProfile as any, {
+      includeApiToken: true,
+      requireSystemDefault: true,
+    });
+    if (resolved.source !== 'system' || !resolved.forwardRuntimeLlm) {
+      return null;
+    }
+
+    return this.toRuntimeLlmPayload({
+      provider: resolved.effective.provider,
+      baseUrl: resolved.effective.baseUrl,
+      model: resolved.effective.model,
+      hasToken: resolved.hasSystemToken,
+      apiToken: resolved.apiToken,
+    });
   }
 
   private normalizeRuntimeStrategy(input: {
@@ -861,6 +995,7 @@ export class AgentBacktestService {
     const summary = asRecord(row.summary_json);
     const diagnostics = asRecord(row.diagnostics_json);
     const decisionSourceBreakdown = asRecord(diagnostics.decision_source_breakdown);
+    const config = this.parseConfigRow(row.config_json);
     return {
       run_group_id: row.id,
       code: row.code,
@@ -882,6 +1017,7 @@ export class AgentBacktestService {
       summary,
       diagnostics,
       decision_source_breakdown: decisionSourceBreakdown,
+      llm_meta: this.buildPublicLlmMeta(config),
       legacy_event_backtest: false,
     };
   }
@@ -1255,6 +1391,7 @@ export class AgentBacktestService {
           phase: base.phase,
           created_at: base.created_at,
           completed_at: base.completed_at,
+          llm_meta: base.llm_meta,
           summary: base.summary,
         };
       }),
@@ -1330,26 +1467,7 @@ export class AgentBacktestService {
       return false;
     }
 
-    const config = safeJsonParse<AgentBacktestConfigRow>(
-      typeof row.config_json === 'string' ? row.config_json : safeJsonStringify(row.config_json),
-      {
-        initial_capital: 100000,
-        commission_rate: 0.0003,
-        slippage_bps: 2,
-        enable_refine: true,
-        runtime_strategy: { position_max_pct: 30, stop_loss_pct: 8, take_profit_pct: 15 },
-        signal_profile_hash: '',
-        signal_profile_version: SIGNAL_PROFILE_VERSION,
-        snapshot_version: SNAPSHOT_VERSION,
-        runtime_llm: {
-          provider: 'openai',
-          base_url: 'https://api.openai.com/v1',
-          model: 'gpt-4o-mini',
-          has_token: false,
-        },
-        runtime_llm_source: 'system',
-      },
-    );
+    const config = this.parseConfigRow(row.config_json);
 
     try {
       const startDate = this.toDay(row.start_date);
@@ -1372,9 +1490,12 @@ export class AgentBacktestService {
         signalProfileHash: config.signal_profile_hash,
         snapshotVersion: config.snapshot_version,
       });
-      const latestDefaults = row.owner_user_id != null
-        ? await this.resolveUserDefaults(row.owner_user_id)
+      const runtimeLlmPayload = row.owner_user_id != null
+        ? await this.resolveRefineRuntimeLlmPayload(row.owner_user_id, config.runtime_llm_source)
         : null;
+      if (config.runtime_llm_source === 'personal' && !runtimeLlmPayload) {
+        throw new Error(PERSONAL_REFINE_RUNTIME_MISSING_MESSAGE);
+      }
 
       const payload = await this.backtestAgentClient.agentRun({
         code: row.code,
@@ -1389,13 +1510,7 @@ export class AgentBacktestService {
         snapshot_version: config.snapshot_version,
         archived_news_by_date: archivedNewsByDate,
         cached_snapshots: cachedSnapshots,
-        ...(
-          latestDefaults?.runtimeLlmPayload
-            ? { runtime_llm: latestDefaults.runtimeLlmPayload }
-            : config.runtime_llm_source === 'personal'
-              ? { runtime_llm: config.runtime_llm }
-              : {}
-        ),
+        ...(runtimeLlmPayload ? { runtime_llm: runtimeLlmPayload } : {}),
       });
 
       const normalized = this.normalizeResult(payload, 'refine');

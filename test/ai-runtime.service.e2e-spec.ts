@@ -75,6 +75,39 @@ describe('AiRuntimeService', () => {
     });
   });
 
+  it('resolves SiliconFlow personal config with stored model and fixed base url', async () => {
+    const service = createService({
+      agentDefault: {
+        available: true,
+        provider: 'deepseek',
+        model: 'deepseek-chat',
+        base_url: 'https://api.deepseek.com/v1',
+        has_token: true,
+      },
+    });
+
+    const resolved = await service.resolveEffectiveLlmFromProfile({
+      aiProvider: 'siliconflow',
+      aiModel: 'Qwen/Qwen3-32B',
+      aiTokenCiphertext: 'ciphertext',
+      aiTokenIv: 'iv',
+      aiTokenTag: 'tag',
+    } as any, {
+      includeApiToken: true,
+      requireSystemDefault: true,
+    });
+
+    expect(resolved.source).toBe('personal');
+    expect(resolved.personalProvider).toBe('siliconflow');
+    expect(resolved.forwardRuntimeLlm).toBe(true);
+    expect(resolved.apiToken).toBe('personal-token-xyz');
+    expect(resolved.effective).toEqual({
+      provider: 'siliconflow',
+      model: 'Qwen/Qwen3-32B',
+      baseUrl: 'https://api.siliconflow.cn/v1',
+    });
+  });
+
   it('falls back to the Agent built-in default when no personal token exists', async () => {
     const service = createService({
       agentDefault: {

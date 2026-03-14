@@ -12,6 +12,7 @@ import * as dotenv from 'dotenv';
 import { AppModule } from './app.module';
 import { STRATEGY_BACKTEST_SCHEMA_NOT_READY_MESSAGE, getBacktestStorageReadiness } from './common/backtest/backtest-storage-readiness';
 import { GlobalHttpExceptionFilter } from './common/errors/http-exception.filter';
+import { getPersonalSecretStatus } from './common/security/personal-crypto.service';
 import { AgentBacktestWorkerService } from './common/worker/agent-backtest-worker.service';
 import { TaskWorkerService } from './common/worker/task-worker.service';
 
@@ -61,6 +62,10 @@ async function assertBacktestStorageReady(): Promise<void> {
 
 async function bootstrap(): Promise<void> {
   setupEnv();
+  const personalSecretStatus = getPersonalSecretStatus();
+  if (!personalSecretStatus.available) {
+    Logger.warn(`个人 AI 绑定不可用：${personalSecretStatus.issue}`, 'Bootstrap');
+  }
   await assertBacktestStorageReady();
 
   const app = await NestFactory.create(AppModule, {

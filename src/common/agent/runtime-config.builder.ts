@@ -7,6 +7,14 @@ function cleanText(value: unknown, fallback = ''): string {
   return text || fallback;
 }
 
+function mapRuntimeProvider(provider: unknown): string {
+  const normalized = cleanText(provider).toLowerCase();
+  if (normalized === 'siliconflow') {
+    return 'custom';
+  }
+  return cleanText(provider);
+}
+
 export function buildRuntimeConfigFromProfile(
   profile: Prisma.AdminUserProfileGetPayload<Record<string, never>> | null,
   username: string,
@@ -41,7 +49,7 @@ export function buildRuntimeConfigFromProfile(
     ...(hasLlm
       ? {
           llm: {
-            provider: cleanText(llm?.provider),
+            provider: mapRuntimeProvider(llm?.provider),
             base_url: cleanText(llm?.baseUrl),
             model: cleanText(llm?.model),
             has_token: hasToken,

@@ -19,6 +19,7 @@ cp .env.example .env
 - `SIMULATION_BIND_BROKER_CODE=backtrader_local`
 - `SIM_PROVIDER_DEFAULT_CODE=backtrader_local`
 - `BROKER_SECRET_KEY`
+- `PERSONAL_SECRET_KEY`（个人 AI 绑定必需，可用 `openssl rand -hex 32` 生成）
 - `ANALYSIS_AUTO_ORDER_*`（风控参数）
 
 3. 若启用后台登录鉴权：

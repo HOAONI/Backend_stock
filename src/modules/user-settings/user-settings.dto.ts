@@ -23,8 +23,8 @@ export class UpdateSimulationSettingsDto {
 
 export class UpdateAiSettingsDto {
   @IsOptional()
-  @IsIn(['openai', 'deepseek'])
-  provider?: 'openai' | 'deepseek';
+  @IsIn(['openai', 'deepseek', 'siliconflow'])
+  provider?: 'openai' | 'deepseek' | 'siliconflow';
 
   @IsOptional()
   @IsString()

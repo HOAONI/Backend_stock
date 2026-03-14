@@ -9,8 +9,8 @@ import { AgentClientService, AgentRuntimeLlmDefaultPayload } from '@/common/agen
 import { PersonalCryptoService } from '@/common/security/personal-crypto.service';
 import { SystemConfigService } from '@/modules/system-config/system-config.service';
 
-export type ResolvedAiProvider = 'gemini' | 'anthropic' | 'openai' | 'deepseek' | 'custom';
-export type PersonalAiProvider = 'deepseek' | 'openai';
+export type ResolvedAiProvider = 'gemini' | 'anthropic' | 'openai' | 'deepseek' | 'custom' | 'siliconflow';
+export type PersonalAiProvider = 'deepseek' | 'openai' | 'siliconflow';
 
 export interface ResolvedAiEndpoint {
   provider: ResolvedAiProvider | '';
@@ -63,6 +63,8 @@ const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_DEEPSEEK_MODEL = 'deepseek-chat';
 const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1';
+export const DEFAULT_SILICONFLOW_MODEL = 'Pro/deepseek-ai/DeepSeek-V3';
+export const DEFAULT_SILICONFLOW_BASE_URL = 'https://api.siliconflow.cn/v1';
 
 const PERSONAL_PROVIDER_PRESETS: Record<PersonalAiProvider, ResolvedAiEndpoint> = {
   deepseek: {
@@ -74,6 +76,11 @@ const PERSONAL_PROVIDER_PRESETS: Record<PersonalAiProvider, ResolvedAiEndpoint> 
     provider: 'openai',
     model: DEFAULT_OPENAI_MODEL,
     baseUrl: DEFAULT_OPENAI_BASE_URL,
+  },
+  siliconflow: {
+    provider: 'siliconflow',
+    model: DEFAULT_SILICONFLOW_MODEL,
+    baseUrl: DEFAULT_SILICONFLOW_BASE_URL,
   },
 };
 
@@ -98,7 +105,7 @@ function inferOpenAiCompatibleProvider(baseUrl: string): Extract<ResolvedAiProvi
 }
 
 function isSupportedPersonalProvider(value: unknown): value is PersonalAiProvider {
-  return value === 'deepseek' || value === 'openai';
+  return value === 'deepseek' || value === 'openai' || value === 'siliconflow';
 }
 
 function createEmptySystemState(): SystemResolvedState {
@@ -139,7 +146,7 @@ export class AiRuntimeService {
       return createEmptySystemState();
     }
 
-    const provider = ['gemini', 'anthropic', 'openai', 'deepseek', 'custom'].includes(providerRaw)
+    const provider = ['gemini', 'anthropic', 'openai', 'deepseek', 'custom', 'siliconflow'].includes(providerRaw)
       ? providerRaw as ResolvedAiProvider
       : inferOpenAiCompatibleProvider(baseUrl);
 
@@ -360,6 +367,18 @@ export class AiRuntimeService {
     });
   }
 
+  private resolvePersonalEndpoint(profile: UserProfile, provider: PersonalAiProvider): ResolvedAiEndpoint {
+    if (provider === 'siliconflow') {
+      return {
+        provider: 'siliconflow',
+        baseUrl: DEFAULT_SILICONFLOW_BASE_URL,
+        model: cleanText(profile?.aiModel) || DEFAULT_SILICONFLOW_MODEL,
+      };
+    }
+
+    return PERSONAL_PROVIDER_PRESETS[provider];
+  }
+
   private resolvePersonalProviderState(profile: UserProfile): {
     personalProvider: PersonalAiProvider | '';
     requiresProviderReselection: boolean;
@@ -410,7 +429,7 @@ export class AiRuntimeService {
         hasSystemToken: systemDefault.hasSystemToken,
         personalProvider: selectedPersonalProvider,
         systemDefault: systemDefault.systemDefault,
-        effective: PERSONAL_PROVIDER_PRESETS[selectedPersonalProvider],
+        effective: this.resolvePersonalEndpoint(profile, selectedPersonalProvider),
         apiToken: options?.includeApiToken ? this.decryptPersonalToken(profile) : null,
         requiresProviderReselection: false,
         forwardRuntimeLlm: true,
