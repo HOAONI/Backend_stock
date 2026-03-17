@@ -1,3 +1,5 @@
+/** 用户个人设置模块使用的数据结构与参数校验定义。 */
+
 import { Type } from 'class-transformer';
 import { IsIn, IsNumber, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
 

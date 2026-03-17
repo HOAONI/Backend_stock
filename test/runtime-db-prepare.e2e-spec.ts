@@ -1,3 +1,5 @@
+/** 运行时数据库预处理单测，确保不同历史库形态会选中正确的 schema 同步策略。 */
+
 import { buildRuntimeDbPrepareSteps, resolveRuntimeDbSyncMode } from '@/common/database/runtime-db-prepare';
 
 describe('runtime db prepare', () => {

@@ -1,3 +1,5 @@
+/** 健康检查模块的控制器入口，负责承接 HTTP 请求并把权限后的参数转发到服务层。 */
+
 import { Controller, Get } from '@nestjs/common';
 
 import {
@@ -6,6 +8,7 @@ import {
 } from '@/common/backtest/backtest-storage-readiness';
 import { PrismaService } from '@/common/database/prisma.service';
 
+/** 负责定义该领域的 HTTP 接口边界，把鉴权后的请求参数整理成服务层可消费的输入。 */
 @Controller('/api/health')
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}

@@ -1,3 +1,5 @@
+/** 交易账户模块的控制器入口，负责承接 HTTP 请求并把权限后的参数转发到服务层。 */
+
 import { Controller, Get, Post, HttpException, HttpStatus, Query, Req, Body, Headers } from '@nestjs/common';
 import { Request } from 'express';
 
@@ -42,10 +44,12 @@ function toHttpException(error: unknown): HttpException {
   );
 }
 
+/** 负责定义该领域的 HTTP 接口边界，把鉴权后的请求参数整理成服务层可消费的输入。 */
 @Controller('/api/v1/users/me/trading')
 export class TradingAccountController {
   constructor(private readonly tradingAccountService: TradingAccountService) {}
 
+  // 交易接口底层完全依赖当前用户绑定的模拟盘上下文，因此必须先拿到稳定的 userId。
   private requireUserId(req: Request): number {
     const userId = req.authUser?.id;
     if (!userId) {
@@ -117,6 +121,7 @@ export class TradingAccountController {
     }
   }
 
+  // 下单支持 body/header 两种幂等键入口，便于前端和自动化任务分别接入。
   @Post('/orders')
   async placeOrder(
     @Req() req: Request,

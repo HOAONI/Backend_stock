@@ -1,3 +1,5 @@
+/** 回测存储检查基础设施中的实现文件，承载该领域的具体逻辑。 */
+
 export const STRATEGY_BACKTEST_REQUIRED_TABLES = [
   'user_backtest_strategies',
   'strategy_backtest_run_groups',

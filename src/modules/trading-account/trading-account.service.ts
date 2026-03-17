@@ -1,3 +1,5 @@
+/** 交易账户模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable } from '@nestjs/common';
 import { UserBrokerSnapshotCache } from '@prisma/client';
 
@@ -108,6 +110,7 @@ export interface TradingRuntimeContextPayload {
   positions: Array<Record<string, unknown>>;
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class TradingAccountService {
   private readonly cacheTtlMs: number;
@@ -264,6 +267,7 @@ export class TradingAccountService {
     const now = Date.now();
     const isCacheFresh = cached ? cached.expiresAt.getTime() > now : false;
     if (!options?.refresh && cached && isCacheFresh) {
+      // 缓存命中时仍要用最新 access 元信息覆盖展示字段，避免 provider/account 名称过期。
       const parsed = this.parseCacheRow(cached, 'cache');
       parsed.account = this.toPublicAccountMeta(access);
       return parsed;
@@ -280,6 +284,7 @@ export class TradingAccountService {
     return text.slice(0, 128);
   }
 
+  // 提供给分析链路的 runtime context 只保留下单决策真正需要的摘要和持仓，避免上下文过重。
   async getRuntimeContext(userId: number, refresh = false): Promise<TradingRuntimeContextPayload> {
     const snapshot = await this.resolveSnapshot(userId, { refresh });
     return {
@@ -296,6 +301,7 @@ export class TradingAccountService {
     };
   }
 
+  // 自动下单幂等依赖 analysisAutoOrder 表，命中已提交记录时直接复用，避免同一任务重复打单。
   private async findExistingIdempotentOrder(userId: number, idempotencyKey: string): Promise<Record<string, unknown> | null> {
     const row = await this.prisma.analysisAutoOrder.findFirst({
       where: {
@@ -321,6 +327,7 @@ export class TradingAccountService {
     };
   }
 
+  // 审计单独落 analysisAutoOrder，后续不论排查自动单、手动单还是幂等冲突都能回放。
   private async writeOrderAudit(input: {
     taskId: string;
     userId: number;
@@ -426,6 +433,7 @@ export class TradingAccountService {
     };
   }
 
+  // 增资属于模拟盘专属能力，不同 adapter 不一定支持，所以先做能力探测再调用上游。
   async addFunds(
     userId: number,
     input: {
@@ -499,6 +507,7 @@ export class TradingAccountService {
     }
   }
 
+  // 下单前先查幂等，再统一写订单审计，确保手动/API/自动补单走同一套留痕口径。
   async placeOrder(
     userId: number,
     order: {
@@ -604,6 +613,7 @@ export class TradingAccountService {
     }
   }
 
+  // 撤单不做额外缓存，直接走 adapter，保持返回结果与上游模拟引擎状态一致。
   async cancelOrder(userId: number, orderId: string, idempotencyKeyRaw?: string): Promise<Record<string, unknown>> {
     const access = await this.brokerAccountsService.resolveSimulationAccess(userId, { requireVerified: true });
     const adapter = this.brokerRegistry.getAdapter(access.brokerCode);

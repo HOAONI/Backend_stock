@@ -1,3 +1,5 @@
+/** Agent 通信基础设施使用的错误定义，统一约束跨层错误语义。 */
+
 import { AgentBridgeMeta } from './agent.types';
 
 export type AgentClientErrorCode =

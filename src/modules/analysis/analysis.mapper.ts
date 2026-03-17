@@ -1,3 +1,5 @@
+/** 股票分析模块中的实现文件，承载该领域的具体逻辑。 */
+
 import { randomUUID } from 'node:crypto';
 
 import { AgentRunPayload } from '@/common/agent/agent.types';

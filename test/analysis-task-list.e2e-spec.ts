@@ -1,8 +1,11 @@
+/** 分析任务列表单测，确保 owner 维度的任务聚合与状态计数返回稳定。 */
+
 import { AnalysisTaskStatus } from '@prisma/client';
 
 import { AnalysisService } from '../src/modules/analysis/analysis.service';
 
 describe('AnalysisService.getTaskList', () => {
+  // 任务列表逻辑只依赖 analysisTask 读接口，用最小 Prisma mock 即可覆盖核心聚合行为。
   const createService = (overrides?: {
     findMany?: jest.Mock;
     groupBy?: jest.Mock;

@@ -1,3 +1,5 @@
+/** 后台认证模块使用的数据结构与参数校验定义。 */
+
 import { IsIn, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class LoginRequestDto {

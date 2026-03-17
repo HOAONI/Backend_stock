@@ -1,3 +1,5 @@
+/** 认证与审计基础设施的中间件实现，在请求进入业务层前统一处理上下文。 */
+
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import { NextFunction, Request, Response } from 'express';
 
@@ -6,6 +8,7 @@ import { COOKIE_NAME } from './auth.constants';
 import { isAuthEnabled } from './auth.utils';
 import { BUILTIN_ROLE_CODES, resolveModuleCode, resolveRbacAction } from './rbac.constants';
 
+// 这些路径需要绕过鉴权，否则健康检查、登录注册和文档工具都会被中间件提前拦截。
 function isExemptPath(pathname: string): boolean {
   const normalized = pathname.endsWith('/') && pathname.length > 1 ? pathname.slice(0, -1) : pathname;
   const exempt = new Set([
@@ -25,6 +28,7 @@ function isExemptPath(pathname: string): boolean {
   return exempt.has(normalized);
 }
 
+/** 负责在请求进入控制器前统一补齐上下文、鉴权或审计信息。 */
 @Injectable()
 export class AuthGuardMiddleware implements NestMiddleware {
   constructor(private readonly authService: AuthService) {}
@@ -38,6 +42,7 @@ export class AuthGuardMiddleware implements NestMiddleware {
       return false;
     }
 
+    // 内置 admin 仍然不能直接操作角色管理，避免 v1 阶段无细粒度保护时误改权限体系。
     if (user.roleCodes.includes(BUILTIN_ROLE_CODES.admin)) {
       return moduleCode !== 'admin_role';
     }
@@ -79,6 +84,7 @@ export class AuthGuardMiddleware implements NestMiddleware {
     }
 
     req.authUser = resolved.user;
+    // 每次带着有效 cookie 访问时都刷新 lastSeenAt，便于后续做在线态判断和审计追踪。
     await this.authService.touchSession(resolved.sessionId);
 
     const moduleCode = resolveModuleCode(path);

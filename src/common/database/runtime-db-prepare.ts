@@ -1,3 +1,5 @@
+/** 数据库基础设施中的实现文件，承载该领域的具体逻辑。 */
+
 export const RUNTIME_DB_LEGACY_MARKER_TABLES = [
   'analysis_history',
   'news_intel',

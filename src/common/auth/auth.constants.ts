@@ -1,3 +1,5 @@
+/** 认证与审计基础设施的常量定义，集中维护默认值与约束边界。 */
+
 export const COOKIE_NAME = 'dsa_session';
 export const SESSION_MAX_AGE_HOURS_DEFAULT = 24;
 export const MIN_PASSWORD_LEN = 6;

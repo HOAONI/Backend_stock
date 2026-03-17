@@ -1,3 +1,5 @@
+/** 用户设置服务单测，覆盖 SiliconFlow 个人绑定的回显、保存、清理与字段隔离。 */
+
 import { UserSettingsService } from '../src/modules/user-settings/user-settings.service';
 
 const SILICONFLOW_BASE_URL = 'https://api.siliconflow.cn/v1';
@@ -9,6 +11,7 @@ const SYSTEM_DEFAULT = {
   source: 'system_config' as const,
 };
 
+// 统一构造一份用户画像，便于不同测试只覆盖 AI 相关字段的变化。
 function createProfile(overrides?: Record<string, unknown>) {
   return {
     id: 1,
@@ -32,6 +35,7 @@ function createProfile(overrides?: Record<string, unknown>) {
   };
 }
 
+// 模拟运行时解析结果，让断言关注“保存后对外回显成什么”而不是底层解密实现。
 function createAiRuntimeMock() {
   return {
     resolveEffectiveLlmFromProfile: jest.fn(async (profile: Record<string, unknown> | null) => {
@@ -74,6 +78,7 @@ function createAiRuntimeMock() {
   };
 }
 
+// 个人密钥加解密只保留行为轮廓，避免测试被真实加密细节耦住。
 function createPersonalCryptoMock(overrides?: Partial<{
   getStatus: jest.Mock
   encrypt: jest.Mock

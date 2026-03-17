@@ -1,3 +1,5 @@
+/** 认证与审计基础设施中的实现文件，承载该领域的具体逻辑。 */
+
 import * as crypto from 'node:crypto';
 
 import { Request } from 'express';

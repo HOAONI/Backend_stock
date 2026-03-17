@@ -1,3 +1,5 @@
+/** 后台角色管理模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
@@ -27,6 +29,7 @@ type RoleWithPermissions = Prisma.AdminRoleGetPayload<{
   };
 }>;
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class AdminRolesService {
   constructor(private readonly prisma: PrismaService) {}

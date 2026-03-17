@@ -1,3 +1,5 @@
+/** 模拟账户模块的控制器入口，负责承接 HTTP 请求并把权限后的参数转发到服务层。 */
+
 import { Body, Controller, Get, HttpException, HttpStatus, Post, Req } from '@nestjs/common';
 import { Request } from 'express';
 
@@ -36,6 +38,7 @@ function toHttpException(error: unknown): HttpException {
   );
 }
 
+/** 负责定义该领域的 HTTP 接口边界，把鉴权后的请求参数整理成服务层可消费的输入。 */
 @Controller('/api/v1/users/me/simulation-account')
 export class SimulationAccountController {
   constructor(private readonly brokerAccountsService: BrokerAccountsService) {}

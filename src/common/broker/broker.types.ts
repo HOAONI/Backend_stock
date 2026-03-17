@@ -1,3 +1,5 @@
+/** 券商适配基础设施使用的共享类型约定。 */
+
 export interface BrokerAccessContext {
   userId: number;
   brokerAccountId: number;

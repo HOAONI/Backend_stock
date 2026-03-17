@@ -1,3 +1,5 @@
+/** 券商适配基础设施使用的错误定义，统一约束跨层错误语义。 */
+
 export class BrokerGatewayError extends Error {
   readonly code: string;
   readonly statusCode?: number;

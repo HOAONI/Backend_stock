@@ -1,3 +1,5 @@
+/** Nest 应用启动入口，负责环境加载、全局中间件和 OpenAPI 初始化。 */
+
 import 'reflect-metadata';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -16,6 +18,7 @@ import { getPersonalSecretStatus } from './common/security/personal-crypto.servi
 import { AgentBacktestWorkerService } from './common/worker/agent-backtest-worker.service';
 import { TaskWorkerService } from './common/worker/task-worker.service';
 
+// 允许脚本或不同启动器通过 ENV_FILE 覆盖默认 .env，避免在入口之外复制环境加载逻辑。
 function setupEnv(): void {
   const envFile = process.env.ENV_FILE;
   const resolved = envFile ? path.resolve(envFile) : path.resolve(process.cwd(), '.env');
@@ -24,6 +27,7 @@ function setupEnv(): void {
   }
 }
 
+// 本地常用前端端口默认放行，能降低开发环境接入成本；生产环境再通过 CORS_ORIGINS 精确收敛。
 function parseOrigins(): string[] {
   const allowAll = (process.env.CORS_ALLOW_ALL ?? 'false').toLowerCase() === 'true';
   if (allowAll) {
@@ -43,6 +47,7 @@ function runWorkerInApiProcess(): boolean {
   return (process.env.RUN_WORKER_IN_API ?? 'false').toLowerCase() === 'true';
 }
 
+// 启动阶段强制校验回测表是否齐全，避免服务已经监听端口后才在首次请求时暴露 schema 缺失。
 async function assertBacktestStorageReady(): Promise<void> {
   const prisma = new PrismaClient();
   try {
@@ -60,6 +65,7 @@ async function assertBacktestStorageReady(): Promise<void> {
   }
 }
 
+// 启动顺序刻意保持为“环境 -> 启动前自检 -> Nest App 初始化”，这样失败能尽量早暴露。
 async function bootstrap(): Promise<void> {
   setupEnv();
   const personalSecretStatus = getPersonalSecretStatus();
@@ -109,6 +115,7 @@ async function bootstrap(): Promise<void> {
 
   const workerServices: Array<{ start: () => Promise<void>; stop: () => void }> = [];
   if (runWorkerInApiProcess()) {
+    // 嵌入式 worker 只用于本地开发或单进程部署，避免默认情况下 API/Worker 相互重复消费任务。
     workerServices.push(app.get(TaskWorkerService));
     workerServices.push(app.get(AgentBacktestWorkerService));
     workerServices.forEach((embeddedWorker) => {
@@ -120,6 +127,7 @@ async function bootstrap(): Promise<void> {
     Logger.log('Embedded worker enabled in API process', 'Bootstrap');
   }
 
+  // SIGINT/SIGTERM 共用同一套收尾逻辑，避免只关 API 不关内嵌 worker。
   const shutdown = async (): Promise<void> => {
     workerServices.forEach(service => service.stop());
     await app.close();

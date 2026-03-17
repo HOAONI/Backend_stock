@@ -1,3 +1,5 @@
+/** 用户个人设置模块的模块装配文件，用于声明控制器、服务与依赖关系。 */
+
 import { Module } from '@nestjs/common';
 
 import { AiRuntimeModule } from '@/common/ai/ai-runtime.module';
@@ -11,4 +13,5 @@ import { UserSettingsService } from './user-settings.service';
   controllers: [UserSettingsController],
   providers: [UserSettingsService],
 })
+/** 负责把该领域需要的控制器、服务与依赖声明组装到同一个 Nest 模块里。 */
 export class UserSettingsModule {}

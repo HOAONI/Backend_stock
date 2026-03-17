@@ -1,3 +1,5 @@
+/** AI 运行时解析单测，验证个人配置、Agent 默认值和 Backend 系统配置之间的优先级。 */
+
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -23,6 +25,7 @@ describe('AiRuntimeService', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  // 通过轻量 mock 组合不同来源的默认配置，让每条断言都只关注优先级决策本身。
   const createService = (input?: {
     configValues?: Record<string, string>;
     agentDefault?: Record<string, unknown>;

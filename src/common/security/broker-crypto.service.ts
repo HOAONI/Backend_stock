@@ -1,3 +1,5 @@
+/** 敏感信息安全基础设施的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import * as crypto from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
@@ -23,6 +25,7 @@ function decodeSecret(secret: string): Buffer {
   return key;
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class BrokerCryptoService {
   private getKey(): Buffer {

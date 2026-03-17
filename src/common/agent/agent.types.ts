@@ -1,3 +1,5 @@
+/** Agent 通信基础设施使用的共享类型约定。 */
+
 export type AgentExecutionMode = 'paper' | 'broker';
 
 export interface AgentRuntimeExecutionConfig {

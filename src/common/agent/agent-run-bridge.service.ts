@@ -1,3 +1,5 @@
+/** Agent 通信基础设施的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable } from '@nestjs/common';
 
 import { AgentRunBridgeError, isAgentClientError } from './agent.errors';
@@ -12,6 +14,7 @@ interface MutableBridgeMeta {
   bridgeErrorCode: string | null;
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class AgentRunBridgeService {
   private readonly pollIntervalMs: number;
@@ -26,6 +29,7 @@ export class AgentRunBridgeService {
     this.retryBaseDelayMs = Math.max(100, Number(process.env.AGENT_TASK_RETRY_BASE_DELAY_MS ?? '1000'));
   }
 
+  // Backend 始终通过 async task 驱动 Agent，这样同步接口、异步队列和 worker 可以复用同一套桥接逻辑。
   async runViaAsyncTask(stockCodes: string[], requestId?: string, options?: CreateAgentRunOptions): Promise<AgentBridgeRunResult> {
     const meta = this.newMutableBridgeMeta();
     let createdTask: AgentTaskPayload;
@@ -60,6 +64,7 @@ export class AgentRunBridgeService {
     return await this.pollUntilFinished(taskId, meta);
   }
 
+  // 轮询阶段只对可重试错误做退避，真正的业务失败要尽快原样抛回调用方。
   private async pollUntilFinished(taskId: string, meta: MutableBridgeMeta): Promise<AgentBridgeRunResult> {
     const startedAt = Date.now();
     let consecutivePollErrors = 0;
@@ -108,6 +113,7 @@ export class AgentRunBridgeService {
     );
   }
 
+  // task 完成并不代表 run 详情已经可读，所以这里还要补一次 getRun 重试。
   private async getRunWithRetry(runId: string, meta: MutableBridgeMeta): Promise<AgentRunPayload> {
     meta.agentRunId = runId;
     let attempt = 0;

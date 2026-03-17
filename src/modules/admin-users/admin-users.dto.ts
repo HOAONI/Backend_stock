@@ -1,3 +1,5 @@
+/** 后台用户管理模块使用的数据结构与参数校验定义。 */
+
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,

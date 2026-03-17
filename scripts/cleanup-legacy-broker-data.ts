@@ -1,3 +1,5 @@
+/** 清理历史券商接入遗留数据，避免旧结构继续污染当前模拟盘链路。 */
+
 import 'reflect-metadata';
 
 import { PrismaService } from '@/common/database/prisma.service';

@@ -1,3 +1,5 @@
+/** 股票分析模块的控制器入口，负责承接 HTTP 请求并把权限后的参数转发到服务层。 */
+
 import { Body, Controller, Get, HttpException, HttpStatus, Param, Patch, Post, Query, Req, Res, Sse } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { interval, Observable, of, startWith, switchMap } from 'rxjs';
@@ -12,6 +14,7 @@ interface MessageEvent {
   type?: string;
 }
 
+/** 负责定义该领域的 HTTP 接口边界，把鉴权后的请求参数整理成服务层可消费的输入。 */
 @Controller('/api/v1/analysis')
 export class AnalysisController {
   constructor(
@@ -19,6 +22,7 @@ export class AnalysisController {
     private readonly analysisSchedulerService: AnalysisSchedulerService,
   ) {}
 
+  // 管理员可以切到全局视角查看所有任务，普通用户只能在自己的任务空间里操作。
   private getRequesterScope(req: Request): { userId: number; includeAll: boolean } {
     const user = req.authUser;
     if (!user) {
@@ -57,6 +61,7 @@ export class AnalysisController {
     );
   }
 
+  // 同一个分析入口同时承载同步直返和异步入队，前端只需要切 async_mode 就能复用参数结构。
   @Post('/analyze')
   async analyze(@Body() request: AnalyzeRequestDto, @Req() req: Request, @Res() res: Response): Promise<void> {
     try {
@@ -129,6 +134,7 @@ export class AnalysisController {
     return await this.analysisService.getTaskList(status, safeLimit, scope);
   }
 
+  // SSE 只推状态变化和心跳，前端据此做增量更新，避免高频全量轮询任务列表。
   @Sse('/tasks/stream')
   taskStream(@Req() req: Request): Observable<MessageEvent> {
     const scope = this.getRequesterScope(req);
@@ -183,6 +189,7 @@ export class AnalysisController {
     );
   }
 
+  // 调度中心接口统一走同一套错误映射，保证前端拿到稳定的 conflict/forbidden/validation 语义。
   @Get('/scheduler/overview')
   async schedulerOverview(
     @Req() req: Request,

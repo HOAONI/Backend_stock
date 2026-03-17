@@ -1,3 +1,5 @@
+/** 后台 Worker 基础设施的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable, Logger } from '@nestjs/common';
 import { AnalysisTaskStatus } from '@prisma/client';
 
@@ -86,6 +88,7 @@ function parseTradingSessions(raw: string): Array<{ start: number; end: number }
     .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.start >= 0 && item.end > item.start);
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class TaskWorkerService {
   private readonly logger = new Logger(TaskWorkerService.name);
@@ -100,6 +103,7 @@ export class TaskWorkerService {
     private readonly tradingAccountService: TradingAccountService,
   ) {}
 
+  // Worker 自己维护心跳与退避节奏，调度中心依赖这两个信号判断“是否卡死”和“是否空闲”。
   async start(): Promise<void> {
     this.running = true;
     this.logger.log('Task worker started');
@@ -129,6 +133,7 @@ export class TaskWorkerService {
     return (process.env.RUN_WORKER_IN_API ?? 'false').toLowerCase() === 'true' ? 'embedded' : 'external';
   }
 
+  // 心跳更新失败只记日志不抛错，避免调度观测链路反向拖垮真正的任务执行链路。
   private async reportHeartbeat(input?: { lastTaskId?: string | null; lastError?: string | null }): Promise<void> {
     try {
       await this.analysisSchedulerService.updateWorkerHeartbeat({
@@ -220,9 +225,11 @@ export class TaskWorkerService {
     forceRuntimeConfig: boolean;
     executionMeta: AnalysisBrokerMeta;
   }> {
+    // 队列里存的是“入队瞬间”的脱敏快照，这里负责在真正执行前决定是否要回源用户实时配置。
     const executionMeta = this.analysisService.resolveExecutionMetaFromPayload(task.requestPayload);
 
     if (task.ownerUserId != null) {
+      // 对真实用户任务优先回源当前用户档案重建 runtime_config，避免队列里残留的是脱敏旧快照。
       const runtime = await this.analysisService.buildRuntimeContext(task.ownerUserId, {
         includeApiToken: true,
       });
@@ -254,6 +261,7 @@ export class TaskWorkerService {
     };
   }
 
+  // 只有“用户请求 auto，但执行计划被降级到 paper，同时全局仍允许 auto”时，才触发本地补偿下单。
   private shouldAutoPlaceOrder(meta: AnalysisBrokerMeta): boolean {
     return meta.requested_execution_mode === 'auto'
       && meta.execution_mode === 'paper'
@@ -270,6 +278,7 @@ export class TaskWorkerService {
     runPayload: Record<string, unknown>;
     executionMeta: AnalysisBrokerMeta;
   }): Record<string, unknown> | null {
+    // 只要 Agent 已经给出明确的执行快照，就直接把它收敛成 Backend 自己的 auto_order 结构。
     if (input.executionMeta.requested_execution_mode !== 'auto') {
       return null;
     }
@@ -325,6 +334,7 @@ export class TaskWorkerService {
     return /^(60|68|00|30)\d{4}$/.test(code);
   }
 
+  // 自动下单默认受交易时段保护，避免夜间补单或脚本重跑时把订单直接打进模拟盘。
   private isWithinTradingSession(now: Date = new Date()): boolean {
     const enforce = (process.env.ANALYSIS_AUTO_ORDER_ENFORCE_SESSION ?? 'true').toLowerCase() === 'true';
     if (!enforce) {
@@ -448,6 +458,7 @@ export class TaskWorkerService {
     quantity: number;
     price: number;
   }): Promise<{ ok: true } | { ok: false; reason: string; details: Record<string, unknown> }> {
+    // 补偿下单前再做一次本地资金/持仓校验，避免分析结果合理但账户状态已经变化时误下单。
     const runtime = await this.tradingAccountService.getRuntimeContext(input.userId, true);
     const summary = asRecord(runtime.summary) ?? {};
     const positions = asRecordArray(runtime.positions);
@@ -501,6 +512,7 @@ export class TaskWorkerService {
     runPayload: Record<string, unknown>;
     executionMeta: AnalysisBrokerMeta;
   }): Promise<Record<string, unknown> | null> {
+    // 如果 Agent 侧已经真正执行过 broker 订单，就直接复用 execution_snapshot，不再由 Backend 二次下单。
     if (!this.shouldAutoPlaceOrder(input.executionMeta)) {
       return null;
     }
@@ -582,6 +594,7 @@ export class TaskWorkerService {
     };
   }
 
+  // 先读一条 pending 候选，再用条件更新抢锁，保证多 worker 并发时同一任务只会被一个实例消费。
   private async processOne(): Promise<boolean> {
     const now = new Date();
     const candidate = await this.prisma.analysisTask.findFirst({
@@ -624,6 +637,7 @@ export class TaskWorkerService {
     return true;
   }
 
+  // 任务完成后会同时写 analysis_history 和 analysis_task：前者保历史查询，后者保调度态与可观测信息。
   private async handleTask(taskRowId: number): Promise<void> {
     const task = await this.prisma.analysisTask.findUnique({ where: { id: taskRowId } });
     if (!task) {
@@ -637,6 +651,7 @@ export class TaskWorkerService {
         runtimeConfig: options.runtimeConfig,
         forceRuntimeConfig: options.forceRuntimeConfig,
       });
+      // 统一先把 Agent 结果折叠成历史记录，再把桥接元信息和自动下单状态附着到任务结果里。
       const mapped = mapAgentRunToAnalysis(bridgeResult.run, task.stockCode, task.reportType);
       const autoOrder = this.deriveAutoOrderFromExecution({
         task: {
@@ -694,6 +709,7 @@ export class TaskWorkerService {
       });
       await this.reportHeartbeat({ lastTaskId: task.taskId });
     } catch (error: unknown) {
+      // 失败分支也要把 bridge_meta 和稳定错误码写回，方便前端、调度中心和排障日志统一消费。
       const failure = this.resolveFailurePresentation(error);
       const bridgeErrorCode = failure.code;
       const explicitBridgeMeta = asRecord((error as { bridgeMeta?: unknown }).bridgeMeta);

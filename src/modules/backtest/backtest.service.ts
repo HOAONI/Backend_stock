@@ -1,3 +1,5 @@
+/** 回测模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
@@ -55,6 +57,7 @@ function buildServiceError(code: string, message: string): ServiceError {
   return error;
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class BacktestService {
   private readonly logger = new Logger(BacktestService.name);
@@ -136,6 +139,7 @@ export class BacktestService {
     return { ownerUserId: scope.userId };
   }
 
+  // 老历史记录里没有独立 analysis_date 时，优先从 context_snapshot 取交易日，否则退回 createdAt 的 UTC 日期。
   private resolveAnalysisDate(contextSnapshot: string | null, createdAt: Date): Date {
     const payload = safeJsonParse<Record<string, any> | null>(contextSnapshot, null);
     const dateString = payload?.enhanced_context?.date;
@@ -239,6 +243,7 @@ export class BacktestService {
     return (BACKTEST_COMPARE_STRATEGY_CODES as readonly string[]).includes(value);
   }
 
+  // 比较策略码只接受白名单值；一旦用户传空或全错，就回退到默认集合，保证接口始终可运行。
   private normalizeCompareStrategyCodes(strategyCodes?: string[]): BacktestCompareStrategyCode[] {
     const candidates = (strategyCodes ?? DEFAULT_BACKTEST_COMPARE_STRATEGY_CODES).map((item) => String(item).trim());
     const normalized = Array.from(new Set(candidates.filter((item): item is BacktestCompareStrategyCode => this.isCompareStrategyCode(item))));
@@ -252,6 +257,7 @@ export class BacktestService {
     return (BACKTEST_STRATEGY_CODES as readonly string[]).includes(value);
   }
 
+  // 用户自定义策略和内置模板要走同一条标准化流程，便于后续统一下发给 Agent。
   private normalizeStrategyCodes(strategyCodes?: string[]): BacktestStrategyCode[] {
     const candidates = (strategyCodes ?? DEFAULT_BACKTEST_STRATEGY_CODES).map((item) => String(item).trim());
     const normalized = Array.from(new Set(candidates.filter((item): item is BacktestStrategyCode => this.isStrategyCode(item))));
@@ -829,6 +835,7 @@ export class BacktestService {
     limit: number;
     scope: { userId: number; includeAll: boolean };
   }): Promise<Record<string, number>> {
+    // run 只补算“尚未有结果”或 force 指定重算的样本，用于日常增量回刷。
     const evalWindowRaw = Number(input.evalWindowDays ?? process.env.BACKTEST_EVAL_WINDOW_DAYS ?? 10);
     const evalWindowDays = Number.isFinite(evalWindowRaw) && evalWindowRaw > 0 ? Math.trunc(evalWindowRaw) : 10;
     const minAgeFloor = Math.max(14, Math.trunc(evalWindowDays));
@@ -909,6 +916,7 @@ export class BacktestService {
     batchSize?: number;
     scope: { userId: number; includeAll: boolean };
   }): Promise<Record<string, number>> {
+    // recomputeAll 会先清空同窗口/引擎版本结果，再按批次完整回灌，适合规则版本升级后的全量重算。
     const evalWindowRaw = Number(input.evalWindowDays ?? process.env.BACKTEST_EVAL_WINDOW_DAYS ?? 10);
     const evalWindowDays = Number.isFinite(evalWindowRaw) && evalWindowRaw > 0 ? Math.trunc(evalWindowRaw) : 10;
     const minAgeFloor = Math.max(14, Math.trunc(evalWindowDays));
@@ -1200,6 +1208,7 @@ export class BacktestService {
     const normalizedCode = String(input.code ?? '').trim();
     const scope: 'overall' | 'stock' = normalizedCode ? 'stock' : 'overall';
     const neutralBandPct = Math.abs(Number(process.env.BACKTEST_NEUTRAL_BAND_PCT ?? 2.0));
+    // 窗口列表先裁剪、去重、排序，避免 compare 接口被前端的异常入参放大成无意义查询。
     const windows = Array.from(
       new Set(
         input.evalWindowDaysList
@@ -1211,6 +1220,7 @@ export class BacktestService {
 
     const rowsByWindow: Record<string, Array<Record<string, unknown>>> = {};
     for (const evalWindowDays of windows) {
+      // compare Agent 需要看到各窗口对应的原始样本行，因此 Backend 逐窗口组装 rows_by_window。
       const where = this.buildScopeWhere({
         scope,
         code: normalizedCode,
@@ -1257,6 +1267,7 @@ export class BacktestService {
       rows_by_window: rowsByWindow,
     });
 
+    // Agent 端保证 strategy_code 稳定即可，展示名由 Backend 按当前内置映射兜底补齐。
     const items = asArrayOfRecords(payload.items).map((item) => ({
       ...item,
       strategy_name:
@@ -1358,6 +1369,7 @@ export class BacktestService {
     slippageBps?: number;
     requester: { userId: number; includeAll: boolean };
   }): Promise<Record<string, unknown>> {
+    // 策略区间回测先把用户自定义策略解析成标准模板参数，再统一交给 Agent 执行并回写明细。
     const code = String(input.code ?? '').trim();
     if (!code) {
       throw buildServiceError('VALIDATION_ERROR', 'code is required');

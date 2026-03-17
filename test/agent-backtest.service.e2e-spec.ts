@@ -1,5 +1,8 @@
+/** Agent 回放回测服务单测，覆盖 llm 元信息回读与 refine 阶段运行时来源切换。 */
+
 import { AgentBacktestService } from '../src/modules/backtest/agent-backtest.service';
 
+// 统一伪造一条 run_group 行，便于分别覆盖 fast/refine/失败等不同阶段的行为。
 function createRunGroupRow(overrides?: Record<string, unknown>) {
   return {
     id: 11,
@@ -55,6 +58,7 @@ function createRunGroupRow(overrides?: Record<string, unknown>) {
   };
 }
 
+// 模拟 AI 运行时解析结果，让测试聚焦“选个人配置还是系统配置”的分支判断。
 function createResolvedRuntime(overrides?: Record<string, unknown>) {
   return {
     source: 'personal',

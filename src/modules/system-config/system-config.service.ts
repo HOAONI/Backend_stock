@@ -1,3 +1,5 @@
+/** 系统配置模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -62,10 +64,12 @@ function categoryMeta(category: ConfigCategory): { title: string; description: s
   return mapping[category];
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class SystemConfigService {
   constructor(private readonly prisma: PrismaService) {}
 
+  // 首次进入配置中心时把当前 .env 快照导入数据库，后续所有配置编辑都以数据库为主。
   private async ensureSeeded(): Promise<void> {
     const count = await this.prisma.systemConfigItem.count();
     if (count > 0) {
@@ -239,6 +243,7 @@ export class SystemConfigService {
     };
   }
 
+  // 配置校验只做“明显不合法”的同步校验，真正依赖外部环境的可用性仍留给运行时检测。
   validateItems(items: Array<{ key: string; value: string }>): { valid: boolean; issues: ConfigValidationIssue[] } {
     const issues: ConfigValidationIssue[] = [];
 
@@ -310,6 +315,7 @@ export class SystemConfigService {
     };
   }
 
+  // 敏感字段回传给前端时会被 mask，更新时如果仍然传 mask_token 就视为“保持原值不变”。
   async updateConfig(input: {
     configVersion: string;
     items: Array<{ key: string; value: string }>;

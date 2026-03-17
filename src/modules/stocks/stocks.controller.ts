@@ -1,3 +1,5 @@
+/** 股票数据模块的控制器入口，负责承接 HTTP 请求并把权限后的参数转发到服务层。 */
+
 import {
   BadRequestException,
   Controller,
@@ -17,6 +19,7 @@ import { ALLOWED_MIME, ImageStockExtractorService, MAX_SIZE_BYTES } from '@/comm
 
 import { StocksService } from './stocks.service';
 
+/** 负责定义该领域的 HTTP 接口边界，把鉴权后的请求参数整理成服务层可消费的输入。 */
 @Controller('/api/v1/stocks')
 export class StocksController {
   constructor(

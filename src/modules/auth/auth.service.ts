@@ -1,3 +1,5 @@
+/** 后台认证模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { AdminUserStatus, Prisma } from '@prisma/client';
 import * as argon2 from 'argon2';
@@ -51,6 +53,7 @@ function normalizeModuleCode(value: string): RbacModuleCode | null {
   return text || null;
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class AuthService implements OnModuleInit {
   private seedPromise: Promise<void> | null = null;
@@ -84,6 +87,7 @@ export class AuthService implements OnModuleInit {
     await this.seedPromise;
   }
 
+  // 每次启动都尝试把内置角色与权限自愈到当前版本，避免历史数据把鉴权链路拖偏。
   private async seedBuiltinRolesAndUsers(): Promise<void> {
     const roleMeta = [
       {
@@ -185,6 +189,7 @@ export class AuthService implements OnModuleInit {
       });
 
       if (users.length === 0) {
+        // 首次启动必须落一个可登录的管理员，否则后台会进入“已开启鉴权但无人可进”的死锁态。
         const username = normalizeUsername(process.env.ADMIN_INIT_USERNAME || 'admin');
         const usernameError = this.validateUsername(username);
         if (usernameError) {
@@ -215,6 +220,7 @@ export class AuthService implements OnModuleInit {
           },
         });
       } else {
+        // 历史版本里存在 super_admin / analyst / operator 等角色，这里统一收敛到 admin / user 两档。
         const migratedUserIds: number[] = [];
 
         for (const user of users) {
@@ -318,6 +324,8 @@ export class AuthService implements OnModuleInit {
   ): Partial<Record<RbacModuleCode, ModulePermission>> {
     const result: Partial<Record<RbacModuleCode, ModulePermission>> = {};
 
+    // 这里把“内置角色的静态权限”和“数据库里自定义角色权限”统一折叠成同一种结构。
+    // 一个用户可能同时挂多个角色，这里按“读写并集”合并，避免权限被后出现的角色覆盖掉。
     for (const userRole of userRoles) {
       const builtinPermissions = resolveBuiltinRolePermissions(userRole.role.roleCode);
       const permissions = builtinPermissions
@@ -384,6 +392,7 @@ export class AuthService implements OnModuleInit {
     displayName?: string;
     accountType?: 'user' | 'admin';
   }): Promise<AuthenticatedUserContext> {
+    // 自注册只允许落到内置角色，保证前端入口不会绕开后台约束创建出未知角色组合。
     const username = normalizeUsername(input.username);
     const usernameError = this.validateUsername(username);
     if (usernameError) {
@@ -428,6 +437,7 @@ export class AuthService implements OnModuleInit {
       throw error;
     }
 
+    // 用户与角色绑定必须在一个事务里创建，避免只建了账号却没落角色导致后续无法登录。
     const passwordHash = await argon2.hash(String(input.password).trim(), { type: argon2.argon2id });
     const user = await this.prisma.$transaction(async (tx) => {
       const created = await tx.adminUser.create({
@@ -484,6 +494,7 @@ export class AuthService implements OnModuleInit {
   }
 
   private async loadSessionWithUser(sessionId: string): Promise<SessionRecord | null> {
+    // 会话解析阶段一次性带出角色和权限，后续 controller/middleware 就不用重复查库拼上下文。
     const session = await this.prisma.adminSession.findUnique({
       where: { sessionId },
       include: {
@@ -510,6 +521,7 @@ export class AuthService implements OnModuleInit {
     return session as SessionRecord;
   }
 
+  // 会话除了验签外，还要再检查过期状态和用户有效性，避免被删除/禁用账号继续沿用旧 cookie。
   async resolveUserFromSessionId(sessionId: string): Promise<AuthenticatedUserContext | null> {
     const session = await this.loadSessionWithUser(sessionId);
     if (!session) {
@@ -529,6 +541,7 @@ export class AuthService implements OnModuleInit {
   }
 
   async resolveUserFromCookie(cookieValue: string): Promise<{ user: AuthenticatedUserContext; sessionId: string } | null> {
+    // cookie 先验签，再回源数据库确认 session 与用户仍然有效，避免中间件层直接处理细节。
     const verified = verifySessionCookie(cookieValue);
     if (!verified.valid || !verified.sessionId) {
       return null;
@@ -582,6 +595,7 @@ export class AuthService implements OnModuleInit {
     return user;
   }
 
+  // 登录成功后会回写 lastLoginAt，既方便运营排查，也能辅助识别“从未真正登录过”的初始化账号。
   async authenticate(username: string, password: string): Promise<AuthenticatedUserContext | null> {
     const user = await this.findActiveUserByUsername(username);
     if (!user) {
@@ -657,6 +671,7 @@ export class AuthService implements OnModuleInit {
     return this.setUserPassword(userId, newPassword);
   }
 
+  // Session 数据始终落服务端数据库，cookie 里只放签名后的 sessionId，便于后续统一失效与审计。
   async createSession(input: {
     userId: number;
     maxAgeSeconds: number;
@@ -698,6 +713,7 @@ export class AuthService implements OnModuleInit {
     });
   }
 
+  // 限流窗口按用户名 + IP 聚合，兼顾暴力破解防护与同一办公网络下的误伤控制。
   async checkRateLimit(ip: string, username: string): Promise<boolean> {
     const key = {
       ip,
@@ -719,6 +735,7 @@ export class AuthService implements OnModuleInit {
     return row.failureCount < RATE_LIMIT_MAX_FAILURES;
   }
 
+  // 失败次数会在窗口期内累加，窗口过后自动重置，避免一次输错永久把用户锁死。
   async recordFailure(ip: string, username: string): Promise<void> {
     const key = {
       ip,

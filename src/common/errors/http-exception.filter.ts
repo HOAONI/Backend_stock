@@ -1,6 +1,9 @@
+/** 错误处理基础设施的异常过滤器，用于统一整理对外错误响应。 */
+
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus } from '@nestjs/common';
 import { Response } from 'express';
 
+/** 负责把内部异常转换成统一的 HTTP 响应结构，避免对外泄漏实现细节。 */
 @Catch()
 export class GlobalHttpExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {

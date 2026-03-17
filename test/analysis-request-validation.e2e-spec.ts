@@ -1,6 +1,9 @@
+/** 分析请求归一化单测，确保 v1 单股票接口不会把多股票输入悄悄截断。 */
+
 import { AnalysisService } from '../src/modules/analysis/analysis.service';
 
 describe('Analysis request validation', () => {
+  // 这里只验证参数归一化，不需要真实依赖注入，直接构造最小 service 即可。
   const createService = (): AnalysisService =>
     new AnalysisService({} as any, {} as any, {} as any, {} as any, {} as any);
 

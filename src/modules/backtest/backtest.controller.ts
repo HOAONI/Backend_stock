@@ -1,3 +1,5 @@
+/** 回测模块的控制器入口，负责承接 HTTP 请求并把权限后的参数转发到服务层。 */
+
 import { Body, Controller, Delete, Get, HttpException, HttpStatus, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import {
@@ -304,6 +306,7 @@ export class AgentBacktestRunsQueryDto {
   limit = 20;
 }
 
+/** 负责定义回测相关 HTTP 接口边界，并把多种回测错误稳定映射成前端可消费的响应语义。 */
 @Controller('/api/v1/backtest')
 export class BacktestController {
   constructor(
@@ -312,6 +315,7 @@ export class BacktestController {
     private readonly agentBacktestService: AgentBacktestService = {} as AgentBacktestService,
   ) {}
 
+  // Prisma 缺表错误会被统一映射成 schema_not_ready，方便前端明确提示“先跑迁移”。
   private isStrategyBacktestSchemaNotReady(error: unknown): boolean {
     if (!error || typeof error !== 'object') {
       return false;
@@ -331,6 +335,7 @@ export class BacktestController {
     return tableName.includes('strategy_backtest_') || message.includes('strategy_backtest_');
   }
 
+  // 策略回测链路同时会抛业务错误和数据库就绪性错误，这里统一转换成稳定的 HTTP 响应。
   private throwStrategyBacktestHttpError(error: unknown): never {
     if (error instanceof HttpException) {
       throw error;
@@ -414,6 +419,7 @@ export class BacktestController {
     return tableName.includes('agent_backtest_') || message.includes('agent_backtest_');
   }
 
+  // Agent 回放回测与普通回测共享控制器，但错误来源不同，所以单独保留一套映射逻辑。
   private throwAgentBacktestHttpError(error: unknown): never {
     if (error instanceof HttpException) {
       throw error;

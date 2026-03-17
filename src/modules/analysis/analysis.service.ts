@@ -1,3 +1,5 @@
+/** 股票分析模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 
@@ -91,6 +93,7 @@ function stageTitle(code: StageCode): string {
   return '执行 Agent';
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class AnalysisService {
   constructor(
@@ -101,6 +104,7 @@ export class AnalysisService {
     private readonly tradingAccountService: TradingAccountService,
   ) {}
 
+  // v1 只支持单股票分析，这里统一把 stock_code / stock_codes 收敛成同一份标准输入。
   normalizeRequest(request: AnalyzeRequestDto): {
     stockCode: string;
     reportType: string;
@@ -138,6 +142,7 @@ export class AnalysisService {
     return (process.env.ANALYSIS_AUTO_ORDER_ENABLED ?? 'true').toLowerCase() === 'true';
   }
 
+  // 每次执行前都按“当前用户画像 + 当前可用 AI 配置”重建 runtime，避免旧任务沿用过期配置。
   async buildRuntimeContext(userId: number, options?: { includeApiToken?: boolean }): Promise<RuntimeContext> {
     const [profile, user] = await this.prisma.$transaction([
       this.prisma.adminUserProfile.findUnique({ where: { userId } }),
@@ -242,6 +247,7 @@ export class AnalysisService {
     };
   }
 
+  // 把前端请求的 auto/paper 翻译成 Agent 真正要执行的 broker/paper，并附带降级原因。
   async resolveExecutionPlan(
     userId: number,
     requestedModeInput?: string | null,
@@ -265,6 +271,7 @@ export class AnalysisService {
     };
   }
 
+  // 旧任务 payload 里可能缺字段或仍沿用旧命名，这里负责兼容回读并补上保守默认值。
   resolveExecutionMetaFromPayload(requestPayload: unknown): AnalysisBrokerMeta {
     const payload = asRecord(requestPayload);
     const meta = asRecord(payload?.meta);
@@ -283,6 +290,7 @@ export class AnalysisService {
     };
   }
 
+  // 真正发给 Agent 的 execution 字段统一在这里组装，避免同步/异步两条链路各自拼装出差异。
   buildRuntimeConfigForExecution(
     runtimeConfig: AgentRuntimeConfig,
     executionMeta: Pick<AnalysisBrokerMeta, 'execution_mode' | 'broker_account_id'>,
@@ -299,6 +307,7 @@ export class AnalysisService {
     return cloned;
   }
 
+  // 同步分析也复用 Agent async bridge，避免同步/异步两条链路出现结果映射差异。
   async runSync(input: {
     stockCode: string;
     reportType: string;
@@ -354,6 +363,7 @@ export class AnalysisService {
     };
   }
 
+  // 入队时只保存脱敏 runtime_config，真正执行时由 worker 按 owner_user_id 回源完整敏感配置。
   async submitAsync(input: {
     stockCode: string;
     reportType: string;

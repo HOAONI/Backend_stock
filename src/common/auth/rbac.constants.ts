@@ -1,3 +1,5 @@
+/** 认证与审计基础设施的常量定义，集中维护默认值与约束边界。 */
+
 export const RBAC_MODULE_CODES = [
   'analysis',
   'history',

@@ -1,3 +1,5 @@
+/** AI 运行时基础设施的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -128,6 +130,7 @@ function createEmptySystemState(): SystemResolvedState {
   };
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class AiRuntimeService {
   constructor(
@@ -136,6 +139,7 @@ export class AiRuntimeService {
     private readonly agentClientService: AgentClientService,
   ) {}
 
+  // Agent 直接上报的默认模型最接近真实执行环境，因此作为最高优先级的信息源。
   private normalizeAgentDefaultPayload(payload: AgentRuntimeLlmDefaultPayload): SystemResolvedState {
     const available = Boolean(payload?.available);
     const providerRaw = cleanText(payload?.provider).toLowerCase();
@@ -333,6 +337,7 @@ export class AiRuntimeService {
     return createEmptySystemState();
   }
 
+  // 系统默认模型的优先级固定为 Agent Runtime -> Agent .env -> Backend Config，避免行为随入口漂移。
   private async resolveSystemDefault(): Promise<SystemResolvedState> {
     const agentDefault = await this.resolveSystemDefaultFromAgent();
     if (agentDefault.hasSystemToken) {
@@ -409,6 +414,7 @@ export class AiRuntimeService {
     };
   }
 
+  // 最终策略是优先个人配置，缺失时再回退系统默认；是否把 token 前传给 Agent 也在这里统一决定。
   async resolveEffectiveLlmFromProfile(
     profile: UserProfile,
     options?: {

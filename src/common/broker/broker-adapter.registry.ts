@@ -1,8 +1,11 @@
+/** 券商适配基础设施的注册中心，用于维护适配器发现与分发。 */
+
 import { Injectable } from '@nestjs/common';
 
 import { BacktraderAgentAdapter } from './backtrader-agent.adapter';
 import { BrokerAdapter } from './broker.types';
 
+/** 负责维护适配器与实现的查找关系，避免业务层直接感知具体实现。 */
 @Injectable()
 export class BrokerAdapterRegistry {
   private readonly adapters: Map<string, BrokerAdapter>;

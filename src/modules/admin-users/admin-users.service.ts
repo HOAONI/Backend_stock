@@ -1,3 +1,5 @@
+/** 后台用户管理模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable } from '@nestjs/common';
 import { AdminUserStatus, Prisma } from '@prisma/client';
 
@@ -41,6 +43,7 @@ function createServiceError(code: string, message: string): ServiceError {
   return error;
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class AdminUsersService {
   constructor(

@@ -1,3 +1,5 @@
+/** 股票分析模块使用的数据结构与参数校验定义。 */
+
 import { IsArray, IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class AnalyzeRequestDto {

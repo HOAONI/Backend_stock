@@ -1,3 +1,5 @@
+/** 通用工具集合中的实现文件，承载该领域的具体逻辑。 */
+
 export function safeJsonParse<T = unknown>(value: string | null | undefined, fallback: T): T {
   if (!value) {
     return fallback;

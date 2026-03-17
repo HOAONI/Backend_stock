@@ -1,3 +1,5 @@
+/** 为 PostgreSQL 补齐运行依赖的约束与索引，减少脏数据写入风险。 */
+
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 

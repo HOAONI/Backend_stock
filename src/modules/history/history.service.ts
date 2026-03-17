@@ -1,3 +1,5 @@
+/** 历史记录模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable } from '@nestjs/common';
 
 import { PrismaService } from '@/common/database/prisma.service';
@@ -12,6 +14,7 @@ function sentimentLabel(score: number): string {
   return '极度悲观';
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class HistoryService {
   constructor(private readonly prisma: PrismaService) {}

@@ -1,3 +1,5 @@
+/** Agent 通信基础设施中的实现文件，承载该领域的具体逻辑。 */
+
 import { Prisma } from '@prisma/client';
 
 import { AgentRuntimeConfig } from './agent.types';

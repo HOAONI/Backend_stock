@@ -1,3 +1,5 @@
+/** 系统配置模块使用的共享类型约定。 */
+
 export type ConfigCategory = 'base' | 'data_source' | 'ai_model' | 'notification' | 'system' | 'backtest' | 'uncategorized';
 export type ConfigDataType = 'string' | 'integer' | 'number' | 'boolean' | 'array' | 'json' | 'time';
 export type ConfigUiControl = 'text' | 'password' | 'number' | 'select' | 'textarea' | 'switch' | 'time';

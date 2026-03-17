@@ -1,3 +1,5 @@
+/** 认证注册链路单测，覆盖 controller 注册流程和 service 自注册角色归属。 */
+
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
@@ -65,6 +67,7 @@ describe('Auth register', () => {
         })),
       };
 
+      // HTTP 层测试只保留 Controller，并把注册/发 session 的副作用全部收敛到 mock service 里。
       const moduleRef = await Test.createTestingModule({
         controllers: [AuthController],
         providers: [
@@ -190,6 +193,7 @@ describe('Auth register', () => {
   });
 
   describe('AuthService role assignment', () => {
+    // 这组测试专门验证自注册最终绑定到哪种内置角色，不依赖完整数据库实现。
     function createServiceHarness() {
       let assignedRoleId: number | null = null;
       const roleIdMap = new Map<number, string>([

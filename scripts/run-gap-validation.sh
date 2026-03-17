@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# 串联关键检查项，快速验证系统级缺口是否已经补齐。
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +21,7 @@ AGENT_TOKEN="${AGENT_TOKEN:-backend_agent_token_v4_2026}"
 E2E_ADMIN_USERNAME="${E2E_ADMIN_USERNAME:-admin}"
 E2E_ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-BackendE2E#2026}"
 
+# 验证脚本默认使用独立数据库名，避免把合同检查或迁移回放写进日常开发库。
 mkdir -p "$TMP_DIR"
 
 BACKEND_API_PID=""
@@ -26,6 +29,7 @@ BACKEND_WORKER_PID=""
 AGENT_PID=""
 OLD_API_PID=""
 
+# 无论失败发生在哪一阶段，都尽量把进程、端口和临时环境清干净，避免下一轮结果被污染。
 cleanup() {
   set +e
   if [[ -n "$BACKEND_WORKER_PID" ]]; then kill "$BACKEND_WORKER_PID" >/dev/null 2>&1 || true; fi
@@ -54,6 +58,7 @@ kill_port() {
   fi
 }
 
+# 每个阶段开始前都主动清端口，避免上一轮遗留进程导致验证结果被旧服务污染。
 wait_for_url() {
   local url="$1"
   local label="$2"
@@ -84,12 +89,14 @@ prepare_backend_db() {
   )
 }
 
+# 先编译一次新后端，确保后续合同对比和 e2e 验证针对的是同一份产物。
 echo "[Build] Compile backend before validation"
 (
   cd "$ROOT_DIR"
   pnpm build >/dev/null
 )
 
+# 第一阶段对比旧后端和新后端合同，优先发现接口字段漂移或行为不兼容。
 echo "[Phase 1/3] Runtime contract comparison (old vs new)"
 kill_port 8000 || true
 kill_port 8001 || true
@@ -132,6 +139,7 @@ OLD_API_PID=""
 kill_port 8000 || true
 kill_port 8002 || true
 
+# 第二阶段同时拉起 Agent、Backend API 和 Worker，走一遍真实业务主链路。
 echo "[Phase 2/3] Agent integration + e2e flow validation"
 kill_port 8000 || true
 kill_port 8001 || true
@@ -199,6 +207,7 @@ AGENT_PID=""
 kill_port 8001 || true
 kill_port 8002 || true
 
+# 第三阶段在独立数据库重放迁移，并核对迁移前后关键表的数量是否一致。
 echo "[Phase 3/3] Migration replay + reconciliation"
 recreate_db "$MIG_DB"
 prepare_backend_db "$MIG_DATABASE_URL"
@@ -211,6 +220,8 @@ prepare_backend_db "$MIG_DATABASE_URL"
   DATABASE_URL="$MIG_DATABASE_URL" \
   pnpm verify:migration "$AGENT_DIR/data/stock_analysis.db" "$ROOT_DIR/docs/MIGRATION_VERIFICATION_REPORT.md"
 )
+
+echo "[Done] Gap validation completed successfully"
 
 echo "Gap validation completed."
 echo "Reports:"

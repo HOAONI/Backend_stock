@@ -1,9 +1,12 @@
+/** 历史记录模块的控制器入口，负责承接 HTTP 请求并把权限后的参数转发到服务层。 */
+
 import { Controller, Get, HttpException, HttpStatus, Param, Query, Req } from '@nestjs/common';
 import { Request } from 'express';
 
 import { BUILTIN_ROLE_CODES } from '@/common/auth/rbac.constants';
 import { HistoryService } from './history.service';
 
+/** 负责定义该领域的 HTTP 接口边界，把鉴权后的请求参数整理成服务层可消费的输入。 */
 @Controller('/api/v1/history')
 export class HistoryController {
   constructor(private readonly historyService: HistoryService) {}

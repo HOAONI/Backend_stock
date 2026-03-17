@@ -1,3 +1,5 @@
+/** 回测模块中的实现文件，承载该领域的具体逻辑。 */
+
 export const BACKTEST_STRATEGY_CODES = ['ma20_trend', 'rsi14_mean_reversion'] as const;
 
 export type LegacyBacktestStrategyCode = (typeof BACKTEST_STRATEGY_CODES)[number];

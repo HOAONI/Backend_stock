@@ -1,3 +1,5 @@
+/** 应用根模块，统一装配业务模块并挂载全局中间件。 */
+
 import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
@@ -43,12 +45,15 @@ import { UserSettingsModule } from './modules/user-settings/user-settings.module
     AdminLogsModule,
   ],
 })
+/** 负责把该领域需要的控制器、服务与依赖声明组装到同一个 Nest 模块里。 */
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
+    // 审计日志放在鉴权之前，这样登录失败、权限不足等请求也能留下完整轨迹。
     consumer
       .apply(AuditLogMiddleware)
       .forRoutes({ path: '*', method: RequestMethod.ALL });
 
+    // 这些接口必须允许匿名访问，否则健康检查、认证入口和文档页都会被鉴权中间件拦住。
     consumer
       .apply(AuthGuardMiddleware)
       .exclude(

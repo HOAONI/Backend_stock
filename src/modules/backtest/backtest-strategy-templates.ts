@@ -1,3 +1,5 @@
+/** 回测模块中的实现文件，承载该领域的具体逻辑。 */
+
 export const BACKTEST_STRATEGY_TEMPLATE_CODES = ['ma_cross', 'rsi_threshold'] as const;
 
 export type BacktestStrategyTemplateCode = (typeof BACKTEST_STRATEGY_TEMPLATE_CODES)[number];

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+/** 调度中心单测，覆盖 retry/rerun/cancel/priority/heartbeat 与 worker 抢任务规则。 */
 
 import { AnalysisTaskStatus } from '@prisma/client';
 
@@ -13,6 +13,7 @@ describe('Analysis scheduler behavior', () => {
   const scopeMine = { userId: 7, includeAll: false };
   const scopeAdmin = { userId: 1, includeAll: true };
 
+  // 用统一任务骨架构造不同状态的样本，避免每条用例都重复拼大段调度字段。
   const makeTask = (overrides: Record<string, unknown> = {}) => ({
     id: 11,
     taskId: 'task-source',
@@ -55,6 +56,7 @@ describe('Analysis scheduler behavior', () => {
     ...overrides,
   });
 
+  // 通过可覆写的 prisma mock，把每条用例真正关心的查询/更新动作单独拉出来断言。
   const createSchedulerService = (overrides?: {
     findFirst?: jest.Mock;
     findUnique?: jest.Mock;

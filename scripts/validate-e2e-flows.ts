@@ -1,3 +1,5 @@
+/** 按真实接口顺序串联关键业务流，便于上线前做一次端到端冒烟验证。 */
+
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -50,6 +52,7 @@ function pickSetCookie(headers: Headers): string[] {
   return raw ? [raw] : [];
 }
 
+// SSE 校验只关心事件名，不追求把整段 payload 复刻下来，目标是验证流式通知链路是否打通。
 async function readSseEvents(
   baseUrl: string,
   cookie: string,
@@ -100,7 +103,7 @@ async function readSseEvents(
       }
     }
   } catch {
-    // Ignore SSE timeout/abort/network errors; caller interprets captured events.
+    // 这里忽略 SSE 超时、主动中断和网络抖动，让调用方只根据已捕获的事件决定是否判失败。
   } finally {
     clearTimeout(timer);
   }
@@ -115,6 +118,7 @@ async function main(): Promise<void> {
   const checks: CheckResult[] = [];
   let cookie = '';
 
+  // 统一封装 request，自动续上 cookie，模拟浏览器在一整条业务流里的真实状态切换。
   const request = async (route: string, init: RequestInit = {}): Promise<ApiResponse> => {
     const headers = new Headers(init.headers ?? {});
     if (cookie) {
@@ -152,6 +156,7 @@ async function main(): Promise<void> {
     };
   };
 
+  // 全部检查项都沉淀成结构化结果，最后统一写报告，方便 CI 和人工排查同时消费。
   const push = (name: string, status: CheckStatus, detail: string): void => {
     checks.push({ name, status, detail });
   };
@@ -756,6 +761,7 @@ async function main(): Promise<void> {
   }
   lines.push('');
 
+  // 报告总是落盘，即使有 fail 也保留现场，方便后续回看失败的是哪一环。
   fs.mkdirSync(path.dirname(reportFile), { recursive: true });
   fs.writeFileSync(reportFile, lines.join('\n'), 'utf8');
 

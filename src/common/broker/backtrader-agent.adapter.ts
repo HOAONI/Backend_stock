@@ -1,3 +1,5 @@
+/** 券商适配基础设施的适配器实现，把外部协议转换成系统内部统一接口。 */
+
 import { Injectable } from '@nestjs/common';
 
 import { BrokerGatewayError } from './broker.errors';
@@ -47,6 +49,7 @@ function toRequestPayload(
   };
 }
 
+/** 负责把外部协议或第三方返回结果映射成系统内部统一的数据约定。 */
 @Injectable()
 export class BacktraderAgentAdapter implements BrokerAdapter {
   readonly brokerCode = 'backtrader_local';

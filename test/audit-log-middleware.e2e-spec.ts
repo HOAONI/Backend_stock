@@ -1,3 +1,5 @@
+/** 审计中间件单测，确保敏感字段进入日志前会被统一脱敏。 */
+
 import { EventEmitter } from 'node:events';
 
 import { AuditLogMiddleware } from '../src/common/auth/audit-log.middleware';
@@ -36,6 +38,7 @@ describe('AuditLogMiddleware', () => {
       },
     } as any;
 
+    // 用 EventEmitter 模拟 Express response 的 finish 生命周期，覆盖日志在响应结束后异步落库的路径。
     const res = Object.assign(new EventEmitter(), {
       statusCode: 201,
       setHeader: jest.fn(),

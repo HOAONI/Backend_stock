@@ -1,3 +1,5 @@
+/** 模拟盘增资单测，覆盖 adapter 能力探测、快照回刷和 DTO 金额校验。 */
+
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 
@@ -6,6 +8,7 @@ import { AddFundsDto } from '../src/modules/trading-account/trading-account.dto'
 
 describe('TradingAccount add funds', () => {
   it('adds funds and refreshes upstream snapshot', async () => {
+    // access 表示当前用户已绑定好的模拟盘上下文，增资和快照刷新都基于它完成。
     const access = {
       userId: 1,
       brokerAccountId: 3,

@@ -1,3 +1,5 @@
+/** 回测比较与 DTO 校验单测，保证 compare 接口的输入约束和转发载荷保持稳定。 */
+
 import { HttpException } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
@@ -192,6 +194,7 @@ describe('Backtest compare validation and forwarding', () => {
       }));
       const service = new BacktestService(prisma as any, { compare } as any, {} as any);
 
+      // 这里既校验筛出来的样本行结构，也校验 compare Agent 接收到的 rows_by_window 形状。
       const response = await service.compareWindows({
         code: '600519',
         evalWindowDaysList: [5, 10],

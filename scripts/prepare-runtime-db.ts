@@ -1,3 +1,5 @@
+/** 在服务启动前补齐运行时数据库前置条件，减少因环境差异导致的启动失败。 */
+
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';

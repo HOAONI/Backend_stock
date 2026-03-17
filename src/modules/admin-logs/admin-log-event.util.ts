@@ -1,3 +1,5 @@
+/** 后台审计日志模块的辅助函数集合，用于承载可复用的数据映射与格式化逻辑。 */
+
 interface AdminLogActor {
   id: number;
   username: string;
@@ -30,6 +32,18 @@ export interface AdminLogEventView {
   targetLabel: string | null;
   actorLabel: string;
   username: string;
+}
+
+interface AdminLogEventContext {
+  input: AdminLogEventInput;
+  actorLabel: string;
+  username: string;
+  normalizedPath: string;
+  pathSegments: string[];
+  searchParams: URLSearchParams;
+  body: Record<string, unknown> | null;
+  query: Record<string, unknown> | null;
+  response: Record<string, unknown> | null;
 }
 
 const MODULE_LABEL_MAP: Record<string, string> = {
@@ -95,8 +109,38 @@ const CONFIG_KEY_LABEL_MAP: Record<string, string> = {
   AGENT_FORWARD_RUNTIME_CONFIG: '转发运行配置到 Agent',
 };
 
+const STATUS_LABEL_MAP: Record<string, string> = {
+  pending: '待处理',
+  processing: '处理中',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+  refining: '精修中',
+};
+
+const USER_SETTINGS_SECTION_LABEL_MAP: Record<string, string> = {
+  simulation: '模拟设置',
+  ai: 'AI 设置',
+  strategy: '策略参数',
+};
+
+const ROLE_CODE_LABEL_MAP: Record<string, string> = {
+  admin: '管理员',
+  user: '普通用户',
+};
+
 function normalizePath(path: string): string {
   return String(path ?? '').split('?')[0] || '';
+}
+
+function parseUrl(path: string): URL {
+  const raw = String(path ?? '').trim();
+  const normalized = raw.startsWith('/') ? raw : `/${raw}`;
+  return new URL(normalized, 'http://audit.local');
+}
+
+function getPathSegments(path: string): string[] {
+  return normalizePath(path).split('/').filter(Boolean);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -125,6 +169,75 @@ function getNumber(value: unknown): number | null {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getBoolean(value: unknown): boolean | null {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  const normalized = asString(value).toLowerCase();
+  if (normalized === 'true') {
+    return true;
+  }
+  if (normalized === 'false') {
+    return false;
+  }
+  return null;
+}
+
+function getNestedValue(value: unknown, ...keys: string[]): unknown {
+  let current: unknown = value;
+  for (const key of keys) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+      return null;
+    }
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function getNestedString(value: unknown, ...keys: string[]): string | null {
+  return getString(getNestedValue(value, ...keys));
+}
+
+function getRecordString(record: Record<string, unknown> | null, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = getString(record?.[key]);
+    if (value) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function getRecordNumber(record: Record<string, unknown> | null, ...keys: string[]): number | null {
+  for (const key of keys) {
+    const value = getNumber(record?.[key]);
+    if (value != null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function getRecordBoolean(record: Record<string, unknown> | null, ...keys: string[]): boolean | null {
+  for (const key of keys) {
+    const value = getBoolean(record?.[key]);
+    if (value != null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function getSearchParam(searchParams: URLSearchParams, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = getString(searchParams.get(key));
+    if (value) {
+      return value;
+    }
+  }
+  return null;
 }
 
 function resolveModuleLabel(moduleCode: string | null | undefined): string {
@@ -171,6 +284,62 @@ function resolveActorLabel(input: AdminLogEventInput): string {
     return displayName;
   }
   return resolveUsername(input);
+}
+
+// 先把原始审计输入规整成统一上下文，后续各模块事件构建器只关心语义，不再重复解析 path/body/query。
+function createContext(input: AdminLogEventInput): AdminLogEventContext {
+  const url = parseUrl(input.path);
+  return {
+    input,
+    actorLabel: resolveActorLabel(input),
+    username: resolveUsername(input),
+    normalizedPath: normalizePath(input.path),
+    pathSegments: getPathSegments(input.path),
+    searchParams: url.searchParams,
+    body: asRecord(input.bodyMasked),
+    query: asRecord(input.queryMasked),
+    response: asRecord(input.responseMasked),
+  };
+}
+
+// 所有事件视图最终都汇总到同一结构，保证列表检索、详情页和关键词搜索使用一致字段。
+function createEventView(
+  ctx: AdminLogEventContext,
+  options: {
+    eventType: string;
+    eventSummary: string;
+    moduleLabel?: string;
+    targetLabel?: string | null;
+  },
+): AdminLogEventView {
+  return {
+    eventType: options.eventType,
+    eventSummary: options.eventSummary,
+    moduleLabel: options.moduleLabel ?? resolveModuleLabel(ctx.input.moduleCode),
+    resultLabel: ctx.input.success ? '成功' : '失败',
+    targetLabel: options.targetLabel ?? null,
+    actorLabel: ctx.actorLabel,
+    username: ctx.username,
+  };
+}
+
+function buildSummary(actorLabel: string, success: boolean, successText: string, failureText = successText): string {
+  return success
+    ? `${actorLabel}${successText}`
+    : `${actorLabel}尝试${failureText}但失败了`;
+}
+
+function buildReadSummary(actorLabel: string, success: boolean, subject: string, refresh = false): string {
+  return buildSummary(
+    actorLabel,
+    success,
+    `${refresh ? '刷新了' : '查看了'}${subject}`,
+    `${refresh ? '刷新' : '查看'}${subject}`,
+  );
+}
+
+function appendDetail(summary: string, detail: string | null): string {
+  return detail ? `${summary}：${detail}` : summary;
 }
 
 function formatAmount(value: number | null): string | null {
@@ -248,17 +417,150 @@ function extractTargetLabelFromResponse(responseMasked: unknown): string | null 
   return null;
 }
 
-function extractStockCodes(bodyMasked: unknown, queryMasked: unknown): string[] {
-  const body = asRecord(bodyMasked);
-  const query = asRecord(queryMasked);
-  const stockCodes = [
-    getString(body?.stock_code),
-    ...asArray(body?.stock_codes).map(item => getString(item)),
-    getString(query?.stock_code),
-    ...asArray(query?.stock_codes).map(item => getString(item)),
-  ].filter((item): item is string => Boolean(item));
+function getPathParamAfter(pathSegments: string[], segment: string): string | null {
+  const index = pathSegments.indexOf(segment);
+  if (index < 0 || index >= pathSegments.length - 1) {
+    return null;
+  }
+  return getString(pathSegments[index + 1]);
+}
 
-  return Array.from(new Set(stockCodes));
+function getQueryString(ctx: AdminLogEventContext, ...keys: string[]): string | null {
+  return getRecordString(ctx.query, ...keys) ?? getSearchParam(ctx.searchParams, ...keys);
+}
+
+function getQueryNumber(ctx: AdminLogEventContext, ...keys: string[]): number | null {
+  const recordValue = getRecordNumber(ctx.query, ...keys);
+  if (recordValue != null) {
+    return recordValue;
+  }
+  return getNumber(getSearchParam(ctx.searchParams, ...keys));
+}
+
+function getQueryBoolean(ctx: AdminLogEventContext, ...keys: string[]): boolean | null {
+  const recordValue = getRecordBoolean(ctx.query, ...keys);
+  if (recordValue != null) {
+    return recordValue;
+  }
+  return getBoolean(getSearchParam(ctx.searchParams, ...keys));
+}
+
+function labelStatus(value: string | null): string | null {
+  const normalized = asString(value).toLowerCase();
+  return normalized ? (STATUS_LABEL_MAP[normalized] ?? normalized) : null;
+}
+
+function labelRoleCode(value: string | null): string | null {
+  const normalized = asString(value).toLowerCase();
+  return normalized ? (ROLE_CODE_LABEL_MAP[normalized] ?? normalized) : null;
+}
+
+function extractStockCodeFromResponse(ctx: AdminLogEventContext): string | null {
+  return getRecordString(ctx.response, 'stock_code', 'stockCode', 'code')
+    ?? getNestedString(ctx.response, 'meta', 'stock_code')
+    ?? getNestedString(ctx.response, 'meta', 'stockCode');
+}
+
+function extractStockCodes(ctx: AdminLogEventContext): string[] {
+  const codes = [
+    getRecordString(ctx.body, 'stock_code', 'stockCode', 'code'),
+    ...asArray(ctx.body?.stock_codes).map(item => getString(item)),
+    getRecordString(ctx.query, 'stock_code', 'stockCode', 'code'),
+    ...asArray(ctx.query?.stock_codes).map(item => getString(item)),
+    getSearchParam(ctx.searchParams, 'stock_code', 'stockCode', 'code'),
+    getPathParamAfter(ctx.pathSegments, 'stocks'),
+    extractStockCodeFromResponse(ctx),
+    getNestedString(ctx.response, 'runtime_strategy', 'stock_code'),
+  ].filter((item): item is string => Boolean(item) && item !== 'extract-from-image');
+
+  return Array.from(new Set(codes));
+}
+
+function extractSimulationAccountLabel(ctx: AdminLogEventContext): string | null {
+  return getRecordString(ctx.response, 'account_display_name', 'accountDisplayName')
+    ?? getRecordString(ctx.body, 'account_display_name', 'accountDisplayName')
+    ?? getRecordString(ctx.response, 'account_uid', 'accountUid')
+    ?? getRecordString(ctx.body, 'account_uid', 'accountUid');
+}
+
+function extractQueryId(ctx: AdminLogEventContext): string | null {
+  return getPathParamAfter(ctx.pathSegments, 'history')
+    ?? getRecordString(ctx.query, 'query_id', 'queryId')
+    ?? getSearchParam(ctx.searchParams, 'query_id', 'queryId')
+    ?? getNestedString(ctx.response, 'meta', 'query_id')
+    ?? getRecordString(ctx.response, 'query_id', 'queryId');
+}
+
+function extractAnalysisTaskId(ctx: AdminLogEventContext): string | null {
+  return getPathParamAfter(ctx.pathSegments, 'tasks')
+    ?? getRecordString(ctx.body, 'task_id', 'taskId')
+    ?? getRecordString(ctx.query, 'task_id', 'taskId')
+    ?? getSearchParam(ctx.searchParams, 'task_id', 'taskId');
+}
+
+function extractBacktestCode(ctx: AdminLogEventContext): string | null {
+  return getRecordString(ctx.body, 'code', 'stock_code', 'stockCode')
+    ?? getRecordString(ctx.query, 'code', 'stock_code', 'stockCode')
+    ?? getSearchParam(ctx.searchParams, 'code', 'stock_code', 'stockCode')
+    ?? getPathParamAfter(ctx.pathSegments, 'performance')
+    ?? extractStockCodeFromResponse(ctx);
+}
+
+function extractEvalWindowDays(ctx: AdminLogEventContext): number | null {
+  return getRecordNumber(ctx.body, 'eval_window_days', 'evalWindowDays')
+    ?? getQueryNumber(ctx, 'eval_window_days', 'evalWindowDays');
+}
+
+function extractDateRangeLabel(
+  startDate: string | null,
+  endDate: string | null,
+): string | null {
+  if (startDate && endDate) {
+    return `${startDate} 至 ${endDate}`;
+  }
+  if (startDate) {
+    return `${startDate} 起`;
+  }
+  if (endDate) {
+    return `截至 ${endDate}`;
+  }
+  return null;
+}
+
+function extractUserSettingsSections(ctx: AdminLogEventContext): string[] {
+  return Object.entries(USER_SETTINGS_SECTION_LABEL_MAP)
+    .filter(([key]) => Object.prototype.hasOwnProperty.call(ctx.body ?? {}, key))
+    .map(([, label]) => label);
+}
+
+function extractStrategyName(ctx: AdminLogEventContext): string | null {
+  return getRecordString(ctx.body, 'name')
+    ?? getRecordString(ctx.response, 'name')
+    ?? getNestedString(ctx.response, 'strategy', 'name');
+}
+
+function extractStrategyId(ctx: AdminLogEventContext): string | null {
+  return getPathParamAfter(ctx.pathSegments, 'strategies')
+    ?? getRecordString(ctx.body, 'strategy_id', 'strategyId')
+    ?? getRecordString(ctx.response, 'id', 'strategy_id', 'strategyId');
+}
+
+function extractRunGroupId(ctx: AdminLogEventContext): string | null {
+  return getPathParamAfter(ctx.pathSegments, 'runs')
+    ?? getRecordString(ctx.body, 'run_group_id', 'runGroupId')
+    ?? getRecordString(ctx.response, 'run_group_id', 'runGroupId');
+}
+
+function formatEvalWindowLabel(days: number | null): string | null {
+  return days != null ? `${days} 日窗口` : null;
+}
+
+function extractAdminRoleLabel(ctx: AdminLogEventContext): string | null {
+  return getRecordString(ctx.response, 'role_name', 'roleName')
+    ?? getRecordString(ctx.body, 'role_name', 'roleName')
+    ?? labelRoleCode(getRecordString(ctx.response, 'role_code', 'roleCode'))
+    ?? labelRoleCode(getRecordString(ctx.body, 'role_code', 'roleCode'))
+    ?? getPathParamAfter(ctx.pathSegments, 'roles');
 }
 
 function findAdminTargetLabel(input: AdminLogEventInput, lookup: AdminLogEventLookup): string | null {
@@ -280,306 +582,1190 @@ function findAdminTargetLabel(input: AdminLogEventInput, lookup: AdminLogEventLo
   return lookup.adminUserLabels?.get(targetId) ?? `用户#${targetId}`;
 }
 
-function buildAnalysisEvent(input: AdminLogEventInput, actorLabel: string): AdminLogEventView {
-  const stockCodes = extractStockCodes(input.bodyMasked, input.queryMasked);
+function buildAnalysisRequestEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const stockCodes = extractStockCodes(ctx);
   const targetLabel = stockCodes.length > 0 ? formatList(stockCodes) : null;
+
   if (stockCodes.length > 1) {
-    return {
+    return createEventView(ctx, {
       eventType: 'analysis_batch',
-      eventSummary: input.success
-        ? `${actorLabel}批量分析了 ${stockCodes.length} 只股票`
-        : `${actorLabel}尝试批量分析 ${stockCodes.length} 只股票但失败了`,
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `批量分析了 ${stockCodes.length} 只股票`,
+        `批量分析 ${stockCodes.length} 只股票`,
+      ),
       moduleLabel: '股票分析',
-      resultLabel: input.success ? '成功' : '失败',
       targetLabel,
-      actorLabel,
-      username: resolveUsername(input),
-    };
+    });
   }
 
   if (stockCodes.length === 1) {
-    return {
+    return createEventView(ctx, {
       eventType: 'analysis_stock',
-      eventSummary: input.success
-        ? `${actorLabel}分析了股票 ${stockCodes[0]}`
-        : `${actorLabel}尝试分析股票 ${stockCodes[0]} 但失败了`,
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `分析了股票 ${stockCodes[0]}`,
+        `分析股票 ${stockCodes[0]}`,
+      ),
       moduleLabel: '股票分析',
-      resultLabel: input.success ? '成功' : '失败',
       targetLabel: stockCodes[0],
-      actorLabel,
-      username: resolveUsername(input),
-    };
+    });
   }
 
-  return {
+  return createEventView(ctx, {
     eventType: 'analysis_request',
-    eventSummary: input.success ? `${actorLabel}发起了一次股票分析` : `${actorLabel}尝试发起股票分析但失败了`,
+    eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, '发起了一次股票分析', '发起股票分析'),
     moduleLabel: '股票分析',
-    resultLabel: input.success ? '成功' : '失败',
-    targetLabel: null,
-    actorLabel,
-    username: resolveUsername(input),
-  };
+  });
 }
 
-function buildFundsEvent(input: AdminLogEventInput, actorLabel: string): AdminLogEventView {
-  const body = asRecord(input.bodyMasked);
-  const amount = formatAmount(getNumber(body?.amount));
+function buildAnalysisEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  if (ctx.normalizedPath === '/api/v1/analysis/analyze') {
+    return buildAnalysisRequestEvent(ctx);
+  }
+
+  if (ctx.normalizedPath === '/api/v1/analysis/tasks') {
+    const statusLabel = labelStatus(getQueryString(ctx, 'status'));
+    const limit = getQueryNumber(ctx, 'limit');
+    const targetLabel = formatList([
+      statusLabel ? `状态：${statusLabel}` : '',
+      limit != null ? `最近 ${limit} 条` : '',
+    ]) || null;
+    const subject = statusLabel ? `${statusLabel}分析任务列表` : '分析任务列表';
+    return createEventView(ctx, {
+      eventType: 'analysis_task_list',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: '股票分析',
+      targetLabel,
+    });
+  }
+
+  if (/^\/api\/v1\/analysis\/tasks\/[^/]+\/stages$/.test(ctx.normalizedPath)) {
+    const taskId = extractAnalysisTaskId(ctx);
+    return createEventView(ctx, {
+      eventType: 'analysis_task_stages',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `分析任务 ${taskId ?? '目标任务'} 的执行阶段`),
+      moduleLabel: '股票分析',
+      targetLabel: taskId,
+    });
+  }
+
+  if (/^\/api\/v1\/analysis\/tasks\/[^/]+\/stages\/stream$/.test(ctx.normalizedPath)) {
+    const taskId = extractAnalysisTaskId(ctx);
+    return createEventView(ctx, {
+      eventType: 'analysis_task_stage_stream',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `订阅了分析任务 ${taskId ?? '目标任务'} 的执行阶段动态`,
+        `订阅分析任务 ${taskId ?? '目标任务'} 的执行阶段动态`,
+      ),
+      moduleLabel: '股票分析',
+      targetLabel: taskId,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/analysis/tasks/stream') {
+    return createEventView(ctx, {
+      eventType: 'analysis_task_stream',
+      eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, '订阅了分析任务动态', '订阅分析任务动态'),
+      moduleLabel: '股票分析',
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/analysis/scheduler/overview') {
+    return createEventView(ctx, {
+      eventType: 'scheduler_overview',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '调度中心概览'),
+      moduleLabel: '调度中心',
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/analysis/scheduler/health') {
+    return createEventView(ctx, {
+      eventType: 'scheduler_health',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '调度中心健康状态'),
+      moduleLabel: '调度中心',
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/analysis/scheduler/tasks') {
+    const statusLabel = labelStatus(getQueryString(ctx, 'status'));
+    const stockCode = getQueryString(ctx, 'stock_code', 'stockCode');
+    const username = getQueryString(ctx, 'username');
+    const targetLabel = formatList([
+      statusLabel ? `状态：${statusLabel}` : '',
+      stockCode ? `股票：${stockCode}` : '',
+      username ? `用户：${username}` : '',
+    ]) || null;
+    return createEventView(ctx, {
+      eventType: 'scheduler_task_list',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '调度任务列表'),
+      moduleLabel: '调度中心',
+      targetLabel,
+    });
+  }
+
+  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+\/retry$/.test(ctx.normalizedPath)) {
+    const taskId = extractAnalysisTaskId(ctx);
+    return createEventView(ctx, {
+      eventType: 'scheduler_task_retry',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `重试了调度任务 ${taskId ?? '目标任务'}`,
+        `重试调度任务 ${taskId ?? '目标任务'}`,
+      ),
+      moduleLabel: '调度中心',
+      targetLabel: taskId,
+    });
+  }
+
+  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+\/rerun$/.test(ctx.normalizedPath)) {
+    const taskId = extractAnalysisTaskId(ctx);
+    return createEventView(ctx, {
+      eventType: 'scheduler_task_rerun',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `重新运行了调度任务 ${taskId ?? '目标任务'}`,
+        `重新运行调度任务 ${taskId ?? '目标任务'}`,
+      ),
+      moduleLabel: '调度中心',
+      targetLabel: taskId,
+    });
+  }
+
+  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+\/cancel$/.test(ctx.normalizedPath)) {
+    const taskId = extractAnalysisTaskId(ctx);
+    return createEventView(ctx, {
+      eventType: 'scheduler_task_cancel',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `取消了调度任务 ${taskId ?? '目标任务'}`,
+        `取消调度任务 ${taskId ?? '目标任务'}`,
+      ),
+      moduleLabel: '调度中心',
+      targetLabel: taskId,
+    });
+  }
+
+  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+\/priority$/.test(ctx.normalizedPath)) {
+    const taskId = extractAnalysisTaskId(ctx);
+    const priority = getRecordNumber(ctx.body, 'priority');
+    const priorityLabel = priority != null ? `优先级 ${priority}` : '任务优先级';
+    return createEventView(ctx, {
+      eventType: 'scheduler_task_priority',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `调整了调度任务 ${taskId ?? '目标任务'} 的${priorityLabel}`,
+        `调整调度任务 ${taskId ?? '目标任务'} 的${priorityLabel}`,
+      ),
+      moduleLabel: '调度中心',
+      targetLabel: taskId,
+    });
+  }
+
+  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+$/.test(ctx.normalizedPath)) {
+    const taskId = extractAnalysisTaskId(ctx);
+    return createEventView(ctx, {
+      eventType: 'scheduler_task_detail',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `调度任务 ${taskId ?? '目标任务'} 详情`),
+      moduleLabel: '调度中心',
+      targetLabel: taskId,
+    });
+  }
+
+  if (/^\/api\/v1\/analysis\/status\/[^/]+$/.test(ctx.normalizedPath)) {
+    const taskId = getPathParamAfter(ctx.pathSegments, 'status');
+    return createEventView(ctx, {
+      eventType: 'analysis_task_status',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `分析任务 ${taskId ?? '目标任务'} 的状态`),
+      moduleLabel: '股票分析',
+      targetLabel: taskId,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'analysis_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '股票分析相关信息'),
+    moduleLabel: '股票分析',
+  });
+}
+
+function buildFundsEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const amount = formatAmount(getRecordNumber(ctx.body, 'amount'));
   const amountLabel = amount ? `${amount} 元` : null;
-  return {
+  return createEventView(ctx, {
     eventType: 'trading_add_funds',
-    eventSummary: input.success
-      ? `${actorLabel}${amountLabel ? `充值了 ${amountLabel}` : '完成了一笔资金充值'}`
-      : `${actorLabel}尝试充值${amountLabel ? ` ${amountLabel}` : ''}但失败了`,
+    eventSummary: buildSummary(
+      ctx.actorLabel,
+      ctx.input.success,
+      amountLabel ? `充值了 ${amountLabel}` : '完成了一笔资金充值',
+      amountLabel ? `充值 ${amountLabel}` : '完成资金充值',
+    ),
     moduleLabel: '交易账户',
-    resultLabel: input.success ? '成功' : '失败',
     targetLabel: amountLabel,
-    actorLabel,
-    username: resolveUsername(input),
-  };
+  });
 }
 
-function buildPlaceOrderEvent(input: AdminLogEventInput, actorLabel: string): AdminLogEventView {
-  const body = asRecord(input.bodyMasked);
-  const stockCode = getString(body?.stock_code);
-  const direction = getString(body?.direction) === 'sell' ? '卖出' : '买入';
-  const quantity = getNumber(body?.quantity);
+function buildPlaceOrderEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const stockCode = getRecordString(ctx.body, 'stock_code', 'stockCode');
+  const direction = getRecordString(ctx.body, 'direction') === 'sell' ? '卖出' : '买入';
+  const quantity = getRecordNumber(ctx.body, 'quantity');
   const quantityLabel = quantity != null ? `${quantity} 股` : '';
   const targetLabel = stockCode ? `${stockCode}${quantityLabel ? ` ${quantityLabel}` : ''}` : null;
 
-  return {
+  return createEventView(ctx, {
     eventType: 'trading_place_order',
-    eventSummary: input.success
-      ? `${actorLabel}提交了${direction}委托${targetLabel ? `：${targetLabel}` : ''}`
-      : `${actorLabel}尝试提交${direction}委托${targetLabel ? `：${targetLabel}` : ''}但失败了`,
+    eventSummary: buildSummary(
+      ctx.actorLabel,
+      ctx.input.success,
+      `提交了${direction}委托${targetLabel ? `：${targetLabel}` : ''}`,
+      `提交${direction}委托${targetLabel ? `：${targetLabel}` : ''}`,
+    ),
     moduleLabel: '交易账户',
-    resultLabel: input.success ? '成功' : '失败',
     targetLabel,
-    actorLabel,
-    username: resolveUsername(input),
-  };
+  });
 }
 
-function buildCancelOrderEvent(input: AdminLogEventInput, actorLabel: string): AdminLogEventView {
-  const body = asRecord(input.bodyMasked);
-  const orderId = getString(body?.order_id);
-  return {
+function buildCancelOrderEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const orderId = getRecordString(ctx.body, 'order_id', 'orderId');
+  return createEventView(ctx, {
     eventType: 'trading_cancel_order',
-    eventSummary: input.success
-      ? `${actorLabel}撤销了订单${orderId ? ` ${orderId}` : ''}`
-      : `${actorLabel}尝试撤销订单${orderId ? ` ${orderId}` : ''}但失败了`,
+    eventSummary: buildSummary(
+      ctx.actorLabel,
+      ctx.input.success,
+      `撤销了订单${orderId ? ` ${orderId}` : ''}`,
+      `撤销订单${orderId ? ` ${orderId}` : ''}`,
+    ),
     moduleLabel: '交易账户',
-    resultLabel: input.success ? '成功' : '失败',
     targetLabel: orderId,
-    actorLabel,
-    username: resolveUsername(input),
-  };
+  });
 }
 
-function buildAdminUserEvent(input: AdminLogEventInput, actorLabel: string, lookup: AdminLogEventLookup): AdminLogEventView {
-  const normalizedPath = normalizePath(input.path);
-  const targetLabel = findAdminTargetLabel(input, lookup);
-  const body = asRecord(input.bodyMasked);
-
-  if (input.method === 'POST' && normalizedPath === '/api/v1/admin/users') {
-    return {
-      eventType: 'admin_user_create',
-      eventSummary: input.success
-        ? `${actorLabel}创建了用户 ${targetLabel ?? '新用户'}`
-        : `${actorLabel}尝试创建用户${targetLabel ? ` ${targetLabel}` : ''}但失败了`,
-      moduleLabel: '用户管理',
-      resultLabel: input.success ? '成功' : '失败',
-      targetLabel,
-      actorLabel,
-      username: resolveUsername(input),
-    };
+function buildTradingAccountEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  if (ctx.normalizedPath === '/api/v1/users/me/trading/funds/add') {
+    return buildFundsEvent(ctx);
   }
 
-  if (input.method === 'PUT' && /\/status$/.test(normalizedPath)) {
-    const status = getString(body?.status) === 'disabled' ? '禁用' : '启用';
-    return {
-      eventType: 'admin_user_status',
-      eventSummary: input.success
-        ? `${actorLabel}将用户 ${targetLabel ?? '目标用户'} 设置为${status}`
-        : `${actorLabel}尝试将用户 ${targetLabel ?? '目标用户'} 设置为${status}但失败了`,
-      moduleLabel: '用户管理',
-      resultLabel: input.success ? '成功' : '失败',
-      targetLabel,
-      actorLabel,
-      username: resolveUsername(input),
-    };
+  if (ctx.normalizedPath === '/api/v1/users/me/trading/orders' && ctx.input.method === 'POST') {
+    return buildPlaceOrderEvent(ctx);
   }
 
-  if (input.method === 'POST' && /\/reset-password$/.test(normalizedPath)) {
-    return {
-      eventType: 'admin_user_reset_password',
-      eventSummary: input.success
-        ? `${actorLabel}重置了用户 ${targetLabel ?? '目标用户'} 的密码`
-        : `${actorLabel}尝试重置用户 ${targetLabel ?? '目标用户'} 的密码但失败了`,
-      moduleLabel: '用户管理',
-      resultLabel: input.success ? '成功' : '失败',
-      targetLabel,
-      actorLabel,
-      username: resolveUsername(input),
-    };
+  if (ctx.normalizedPath === '/api/v1/users/me/trading/orders/cancel') {
+    return buildCancelOrderEvent(ctx);
   }
 
-  if (input.method === 'DELETE') {
-    return {
-      eventType: 'admin_user_delete',
-      eventSummary: input.success
-        ? `${actorLabel}删除了用户 ${targetLabel ?? '目标用户'}`
-        : `${actorLabel}尝试删除用户 ${targetLabel ?? '目标用户'} 但失败了`,
-      moduleLabel: '用户管理',
-      resultLabel: input.success ? '成功' : '失败',
-      targetLabel,
-      actorLabel,
-      username: resolveUsername(input),
-    };
+  const refresh = getQueryBoolean(ctx, 'refresh') === true;
+
+  if (ctx.normalizedPath === '/api/v1/users/me/trading/account-summary') {
+    return createEventView(ctx, {
+      eventType: 'trading_account_summary',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '交易账户总览', refresh),
+      moduleLabel: '交易账户',
+      targetLabel: refresh ? '已刷新' : null,
+    });
   }
 
-  return {
-    eventType: 'admin_user_update',
-    eventSummary: input.success
-      ? `${actorLabel}更新了用户 ${targetLabel ?? '目标用户'}`
-      : `${actorLabel}尝试更新用户 ${targetLabel ?? '目标用户'} 但失败了`,
-    moduleLabel: '用户管理',
-    resultLabel: input.success ? '成功' : '失败',
+  if (ctx.normalizedPath === '/api/v1/users/me/trading/positions') {
+    return createEventView(ctx, {
+      eventType: 'trading_positions',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '持仓信息', refresh),
+      moduleLabel: '交易账户',
+      targetLabel: refresh ? '已刷新' : null,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/users/me/trading/orders') {
+    return createEventView(ctx, {
+      eventType: 'trading_orders',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '委托列表', refresh),
+      moduleLabel: '交易账户',
+      targetLabel: refresh ? '已刷新' : null,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/users/me/trading/trades') {
+    return createEventView(ctx, {
+      eventType: 'trading_trades',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '成交记录', refresh),
+      moduleLabel: '交易账户',
+      targetLabel: refresh ? '已刷新' : null,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/users/me/trading/performance') {
+    return createEventView(ctx, {
+      eventType: 'trading_performance',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '交易绩效', refresh),
+      moduleLabel: '交易账户',
+      targetLabel: refresh ? '已刷新' : null,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'trading_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '交易账户信息'),
+    moduleLabel: '交易账户',
+  });
+}
+
+function buildBrokerAccountEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const targetLabel = extractSimulationAccountLabel(ctx);
+
+  if (ctx.normalizedPath === '/api/v1/users/me/simulation-account/status') {
+    const subject = appendDetail('模拟账户状态', targetLabel);
+    return createEventView(ctx, {
+      eventType: 'simulation_account_status',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: '模拟账户',
+      targetLabel,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/users/me/simulation-account/bind') {
+    return createEventView(ctx, {
+      eventType: 'simulation_account_bind',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `绑定了模拟账户${targetLabel ? ` ${targetLabel}` : ''}`,
+        `绑定模拟账户${targetLabel ? ` ${targetLabel}` : ''}`,
+      ),
+      moduleLabel: '模拟账户',
+      targetLabel,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'simulation_account_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '模拟账户信息'),
+    moduleLabel: '模拟账户',
     targetLabel,
-    actorLabel,
-    username: resolveUsername(input),
-  };
+  });
 }
 
-function buildSystemConfigEvent(input: AdminLogEventInput, actorLabel: string): AdminLogEventView {
-  const changedKeys = extractConfigKeys(input.bodyMasked);
+function buildStocksEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const stockCode = getPathParamAfter(ctx.pathSegments, 'stocks');
+
+  if (ctx.normalizedPath === '/api/v1/stocks/extract-from-image') {
+    const targetLabel = formatList(
+      asArray(ctx.response?.codes)
+        .map(item => getString(item))
+        .filter((item): item is string => Boolean(item)),
+    ) || null;
+    return createEventView(ctx, {
+      eventType: 'stocks_extract_from_image',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `从图片中识别了股票代码${targetLabel ? `：${targetLabel}` : ''}`,
+        '从图片中识别股票代码',
+      ),
+      moduleLabel: '股票数据',
+      targetLabel,
+    });
+  }
+
+  if (stockCode && ctx.normalizedPath.endsWith('/quote')) {
+    return createEventView(ctx, {
+      eventType: 'stocks_quote',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `股票 ${stockCode} 的实时行情`),
+      moduleLabel: '股票数据',
+      targetLabel: stockCode,
+    });
+  }
+
+  if (stockCode && ctx.normalizedPath.endsWith('/history')) {
+    const days = getQueryNumber(ctx, 'days');
+    const subject = days != null
+      ? `股票 ${stockCode} 近 ${days} 天的历史走势`
+      : `股票 ${stockCode} 的历史走势`;
+    return createEventView(ctx, {
+      eventType: 'stocks_history',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: '股票数据',
+      targetLabel: stockCode,
+    });
+  }
+
+  if (stockCode && ctx.normalizedPath.endsWith('/indicators')) {
+    return createEventView(ctx, {
+      eventType: 'stocks_indicators',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `股票 ${stockCode} 的技术指标`),
+      moduleLabel: '股票数据',
+      targetLabel: stockCode,
+    });
+  }
+
+  if (stockCode && ctx.normalizedPath.endsWith('/factors')) {
+    const date = getQueryString(ctx, 'date');
+    const subject = date
+      ? `股票 ${stockCode} 在 ${date} 的因子数据`
+      : `股票 ${stockCode} 的因子数据`;
+    return createEventView(ctx, {
+      eventType: 'stocks_factors',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: '股票数据',
+      targetLabel: stockCode,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'stocks_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '股票数据'),
+    moduleLabel: '股票数据',
+    targetLabel: stockCode,
+  });
+}
+
+function buildHistoryEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  if (ctx.normalizedPath === '/api/v1/history') {
+    const stockCode = getQueryString(ctx, 'stock_code', 'stockCode');
+    const dateRangeLabel = extractDateRangeLabel(
+      getQueryString(ctx, 'start_date', 'startDate'),
+      getQueryString(ctx, 'end_date', 'endDate'),
+    );
+    const targetLabel = formatList([
+      stockCode ? `股票：${stockCode}` : '',
+      dateRangeLabel ? `时间：${dateRangeLabel}` : '',
+    ]) || null;
+    const subject = stockCode ? `股票 ${stockCode} 的分析历史` : '分析历史列表';
+    return createEventView(ctx, {
+      eventType: 'history_list',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: '历史记录',
+      targetLabel,
+    });
+  }
+
+  if (/^\/api\/v1\/history\/[^/]+\/news$/.test(ctx.normalizedPath)) {
+    const queryId = extractQueryId(ctx);
+    const stockCode = extractStockCodeFromResponse(ctx);
+    const subject = stockCode
+      ? `股票 ${stockCode} 分析记录的相关新闻`
+      : `分析记录 ${queryId ?? '目标记录'} 的相关新闻`;
+    return createEventView(ctx, {
+      eventType: 'history_news',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: '历史记录',
+      targetLabel: stockCode ?? queryId,
+    });
+  }
+
+  if (/^\/api\/v1\/history\/[^/]+$/.test(ctx.normalizedPath)) {
+    const queryId = extractQueryId(ctx);
+    const stockCode = extractStockCodeFromResponse(ctx);
+    const subject = stockCode
+      ? `股票 ${stockCode} 的分析记录`
+      : `分析记录 ${queryId ?? '目标记录'}`;
+    return createEventView(ctx, {
+      eventType: 'history_detail',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: '历史记录',
+      targetLabel: stockCode ?? queryId,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'history_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '历史记录'),
+    moduleLabel: '历史记录',
+  });
+}
+
+function buildAdminUserEvent(ctx: AdminLogEventContext, lookup: AdminLogEventLookup): AdminLogEventView {
+  const targetLabel = findAdminTargetLabel(ctx.input, lookup);
+  const body = ctx.body;
+
+  if (ctx.input.method === 'GET' && ctx.normalizedPath === '/api/v1/admin/users') {
+    const keyword = getQueryString(ctx, 'keyword');
+    const roleCode = labelRoleCode(getQueryString(ctx, 'role_code', 'roleCode'));
+    const targetFilters = formatList([
+      keyword ? `关键词：${keyword}` : '',
+      roleCode ? `角色：${roleCode}` : '',
+    ]) || null;
+
+    return createEventView(ctx, {
+      eventType: 'admin_user_list',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '用户列表'),
+      moduleLabel: '用户管理',
+      targetLabel: targetFilters,
+    });
+  }
+
+  if (ctx.input.method === 'GET' && /^\/api\/v1\/admin\/users\/[^/]+$/.test(ctx.normalizedPath)) {
+    return createEventView(ctx, {
+      eventType: 'admin_user_detail',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, appendDetail('用户详情', targetLabel)),
+      moduleLabel: '用户管理',
+      targetLabel,
+    });
+  }
+
+  if (ctx.input.method === 'POST' && ctx.normalizedPath === '/api/v1/admin/users') {
+    return createEventView(ctx, {
+      eventType: 'admin_user_create',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `创建了用户 ${targetLabel ?? '新用户'}`,
+        `创建用户${targetLabel ? ` ${targetLabel}` : ''}`,
+      ),
+      moduleLabel: '用户管理',
+      targetLabel,
+    });
+  }
+
+  if (ctx.input.method === 'PUT' && /\/status$/.test(ctx.normalizedPath)) {
+    const status = getRecordString(body, 'status') === 'disabled' ? '禁用' : '启用';
+    return createEventView(ctx, {
+      eventType: 'admin_user_status',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `将用户 ${targetLabel ?? '目标用户'} 设置为${status}`,
+        `将用户 ${targetLabel ?? '目标用户'} 设置为${status}`,
+      ),
+      moduleLabel: '用户管理',
+      targetLabel,
+    });
+  }
+
+  if (ctx.input.method === 'POST' && /\/reset-password$/.test(ctx.normalizedPath)) {
+    return createEventView(ctx, {
+      eventType: 'admin_user_reset_password',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `重置了用户 ${targetLabel ?? '目标用户'} 的密码`,
+        `重置用户 ${targetLabel ?? '目标用户'} 的密码`,
+      ),
+      moduleLabel: '用户管理',
+      targetLabel,
+    });
+  }
+
+  if (ctx.input.method === 'DELETE') {
+    return createEventView(ctx, {
+      eventType: 'admin_user_delete',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `删除了用户 ${targetLabel ?? '目标用户'}`,
+        `删除用户 ${targetLabel ?? '目标用户'}`,
+      ),
+      moduleLabel: '用户管理',
+      targetLabel,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'admin_user_update',
+    eventSummary: buildSummary(
+      ctx.actorLabel,
+      ctx.input.success,
+      `更新了用户 ${targetLabel ?? '目标用户'}`,
+      `更新用户 ${targetLabel ?? '目标用户'}`,
+    ),
+    moduleLabel: '用户管理',
+    targetLabel,
+  });
+}
+
+function buildAdminRoleEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const targetLabel = extractAdminRoleLabel(ctx);
+
+  if (ctx.input.method === 'GET' && ctx.normalizedPath === '/api/v1/admin/roles') {
+    const keyword = getQueryString(ctx, 'keyword');
+    return createEventView(ctx, {
+      eventType: 'admin_role_list',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '角色列表'),
+      moduleLabel: '角色管理',
+      targetLabel: keyword ? `关键词：${keyword}` : null,
+    });
+  }
+
+  if (ctx.input.method === 'GET' && /^\/api\/v1\/admin\/roles\/[^/]+$/.test(ctx.normalizedPath)) {
+    return createEventView(ctx, {
+      eventType: 'admin_role_detail',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, appendDetail('角色详情', targetLabel)),
+      moduleLabel: '角色管理',
+      targetLabel,
+    });
+  }
+
+  if (ctx.input.method === 'POST' && ctx.normalizedPath === '/api/v1/admin/roles') {
+    return createEventView(ctx, {
+      eventType: 'admin_role_create',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `创建了角色${targetLabel ? ` ${targetLabel}` : ''}`,
+        `创建角色${targetLabel ? ` ${targetLabel}` : ''}`,
+      ),
+      moduleLabel: '角色管理',
+      targetLabel,
+    });
+  }
+
+  if (ctx.input.method === 'PUT' && /^\/api\/v1\/admin\/roles\/[^/]+$/.test(ctx.normalizedPath)) {
+    return createEventView(ctx, {
+      eventType: 'admin_role_update',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `更新了角色${targetLabel ? ` ${targetLabel}` : ''}`,
+        `更新角色${targetLabel ? ` ${targetLabel}` : ''}`,
+      ),
+      moduleLabel: '角色管理',
+      targetLabel,
+    });
+  }
+
+  if (ctx.input.method === 'DELETE' && /^\/api\/v1\/admin\/roles\/[^/]+$/.test(ctx.normalizedPath)) {
+    return createEventView(ctx, {
+      eventType: 'admin_role_delete',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `删除了角色${targetLabel ? ` ${targetLabel}` : ''}`,
+        `删除角色${targetLabel ? ` ${targetLabel}` : ''}`,
+      ),
+      moduleLabel: '角色管理',
+      targetLabel,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'admin_role_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '角色管理'),
+    moduleLabel: '角色管理',
+    targetLabel,
+  });
+}
+
+function buildAdminLogEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  if (ctx.normalizedPath === '/api/v1/admin/logs') {
+    const moduleCode = getQueryString(ctx, 'module_code', 'moduleCode');
+    const method = getQueryString(ctx, 'method');
+    const keyword = getQueryString(ctx, 'keyword');
+    const targetLabel = formatList([
+      keyword ? `关键词：${keyword}` : '',
+      moduleCode ? `模块：${resolveModuleLabel(moduleCode)}` : '',
+      method ? `方法：${method.toUpperCase()}` : '',
+    ]) || null;
+
+    return createEventView(ctx, {
+      eventType: 'admin_log_list',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '日志列表'),
+      moduleLabel: '日志管理',
+      targetLabel,
+    });
+  }
+
+  if (/^\/api\/v1\/admin\/logs\/[^/]+$/.test(ctx.normalizedPath)) {
+    const logId = getPathParamAfter(ctx.pathSegments, 'logs');
+    return createEventView(ctx, {
+      eventType: 'admin_log_detail',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `日志 #${logId ?? '目标日志'} 详情`),
+      moduleLabel: '日志管理',
+      targetLabel: logId ? `日志 #${logId}` : null,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'admin_log_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '日志管理'),
+    moduleLabel: '日志管理',
+  });
+}
+
+function buildSystemConfigEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const changedKeys = extractConfigKeys(ctx.body);
   const changedLabels = changedKeys.map(labelConfigKey);
   const targetLabel = formatList(changedLabels) || null;
-  const isStrategyConfig = changedKeys.length > 0 && changedKeys.every(key => {
+  const isStrategyConfig = changedKeys.length > 0 && changedKeys.every((key) => {
     const category = inferConfigCategory(key);
     return category === 'base' || category === 'backtest';
   });
   const moduleLabel = isStrategyConfig ? '策略参数' : '配置管理';
 
-  if (normalizePath(input.path) === '/api/v1/system/config/validate') {
-    return {
+  if (ctx.normalizedPath === '/api/v1/system/config' && ctx.input.method === 'GET') {
+    const includeSchema = getQueryBoolean(ctx, 'include_schema', 'includeSchema');
+    return createEventView(ctx, {
+      eventType: 'system_config_view',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '系统配置'),
+      moduleLabel: '配置管理',
+      targetLabel: includeSchema ? '包含配置结构' : null,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/system/config/schema' && ctx.input.method === 'GET') {
+    return createEventView(ctx, {
+      eventType: 'system_config_schema',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '配置结构'),
+      moduleLabel: '配置管理',
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/system/config/validate') {
+    return createEventView(ctx, {
       eventType: isStrategyConfig ? 'strategy_config_validate' : 'system_config_validate',
-      eventSummary: `${actorLabel}校验了${moduleLabel}${changedKeys.length ? `（${changedKeys.length} 项）` : ''}`,
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `校验了${moduleLabel}${changedKeys.length ? `（${changedKeys.length} 项）` : ''}`,
+        `校验${moduleLabel}${changedKeys.length ? `（${changedKeys.length} 项）` : ''}`,
+      ),
       moduleLabel,
-      resultLabel: input.success ? '成功' : '失败',
       targetLabel,
-      actorLabel,
-      username: resolveUsername(input),
-    };
+    });
   }
 
-  return {
+  return createEventView(ctx, {
     eventType: isStrategyConfig ? 'strategy_config_update' : 'system_config_update',
-    eventSummary: input.success
-      ? `${actorLabel}${isStrategyConfig ? '调整了策略参数' : '修改了系统配置'}${targetLabel ? `：${targetLabel}` : changedKeys.length ? `（${changedKeys.length} 项）` : ''}`
-      : `${actorLabel}尝试${isStrategyConfig ? '调整策略参数' : '修改系统配置'}但失败了`,
+    eventSummary: buildSummary(
+      ctx.actorLabel,
+      ctx.input.success,
+      `${isStrategyConfig ? '调整了策略参数' : '修改了系统配置'}${targetLabel ? `：${targetLabel}` : changedKeys.length ? `（${changedKeys.length} 项）` : ''}`,
+      isStrategyConfig ? '调整策略参数' : '修改系统配置',
+    ),
     moduleLabel,
-    resultLabel: input.success ? '成功' : '失败',
     targetLabel,
-    actorLabel,
-    username: resolveUsername(input),
-  };
+  });
 }
 
-function buildAuthEvent(input: AdminLogEventInput, actorLabel: string): AdminLogEventView {
-  const normalizedPath = normalizePath(input.path);
-  const body = asRecord(input.bodyMasked);
+function buildUserSettingsEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  if (ctx.normalizedPath === '/api/v1/users/me/settings' && ctx.input.method === 'GET') {
+    return createEventView(ctx, {
+      eventType: 'user_settings_view',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '个人设置'),
+      moduleLabel: '用户设置',
+    });
+  }
 
-  if (normalizedPath === '/api/v1/auth/login') {
-    return {
+  if (ctx.normalizedPath === '/api/v1/users/me/settings' && ctx.input.method === 'PUT') {
+    const sectionLabels = extractUserSettingsSections(ctx);
+    const targetLabel = formatList(sectionLabels) || null;
+    return createEventView(ctx, {
+      eventType: 'user_settings_update',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `修改了个人设置${targetLabel ? `：${targetLabel}` : ''}`,
+        '修改个人设置',
+      ),
+      moduleLabel: '用户设置',
+      targetLabel,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'user_settings_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '用户设置'),
+    moduleLabel: '用户设置',
+  });
+}
+
+function buildAuthEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  if (ctx.normalizedPath === '/api/v1/auth/status') {
+    const currentUser = getNestedString(ctx.response, 'currentUser', 'username')
+      ?? getNestedString(ctx.response, 'currentUser', 'display_name')
+      ?? getNestedString(ctx.response, 'currentUser', 'displayName');
+    const loggedIn = getRecordBoolean(ctx.response, 'loggedIn', 'logged_in');
+    const targetLabel = currentUser ?? (loggedIn === false ? '未登录' : null);
+    return createEventView(ctx, {
+      eventType: 'auth_status',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '登录状态'),
+      moduleLabel: '认证',
+      targetLabel,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/auth/login') {
+    return createEventView(ctx, {
       eventType: 'auth_login',
-      eventSummary: input.success ? `${actorLabel}登录了系统` : `${actorLabel}尝试登录系统但失败了`,
+      eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, '登录了系统', '登录系统'),
       moduleLabel: '认证',
-      resultLabel: input.success ? '成功' : '失败',
-      targetLabel: getString(body?.username),
-      actorLabel,
-      username: resolveUsername(input),
-    };
+      targetLabel: getRecordString(ctx.body, 'username'),
+    });
   }
 
-  if (normalizedPath === '/api/v1/auth/register') {
-    const accountType = getString(body?.accountType) === 'admin' ? '管理员账号' : '普通用户账号';
-    return {
+  if (ctx.normalizedPath === '/api/v1/auth/register') {
+    const accountType = getRecordString(ctx.body, 'accountType') === 'admin' ? '管理员账号' : '普通用户账号';
+    return createEventView(ctx, {
       eventType: 'auth_register',
-      eventSummary: input.success
-        ? `${actorLabel}注册了${accountType}`
-        : `${actorLabel}尝试注册${accountType}但失败了`,
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `注册了${accountType}`,
+        `注册${accountType}`,
+      ),
       moduleLabel: '认证',
-      resultLabel: input.success ? '成功' : '失败',
-      targetLabel: getString(body?.username),
-      actorLabel,
-      username: resolveUsername(input),
-    };
+      targetLabel: getRecordString(ctx.body, 'username'),
+    });
   }
 
-  if (normalizedPath === '/api/v1/auth/change-password') {
-    return {
+  if (ctx.normalizedPath === '/api/v1/auth/change-password') {
+    return createEventView(ctx, {
       eventType: 'auth_change_password',
-      eventSummary: input.success ? `${actorLabel}修改了登录密码` : `${actorLabel}尝试修改登录密码但失败了`,
+      eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, '修改了登录密码', '修改登录密码'),
       moduleLabel: '认证',
-      resultLabel: input.success ? '成功' : '失败',
-      targetLabel: null,
-      actorLabel,
-      username: resolveUsername(input),
-    };
+    });
   }
 
-  return {
-    eventType: 'auth_request',
-    eventSummary: input.success ? `${actorLabel}执行了认证操作` : `${actorLabel}尝试执行认证操作但失败了`,
+  if (ctx.normalizedPath === '/api/v1/auth/logout') {
+    return createEventView(ctx, {
+      eventType: 'auth_logout',
+      eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, '退出了系统', '退出系统'),
+      moduleLabel: '认证',
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'auth_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '认证信息'),
     moduleLabel: '认证',
-    resultLabel: input.success ? '成功' : '失败',
-    targetLabel: null,
-    actorLabel,
-    username: resolveUsername(input),
-  };
+  });
 }
 
-function buildFallbackEvent(input: AdminLogEventInput, actorLabel: string): AdminLogEventView {
-  const moduleLabel = resolveModuleLabel(input.moduleCode);
-  return {
-    eventType: `generic_${asString(input.method).toLowerCase() || 'request'}`,
-    eventSummary: `${actorLabel}在 ${moduleLabel} 执行了 ${asString(input.method) || 'REQUEST'} ${normalizePath(input.path)}`,
+function buildBacktestStrategyLibraryEvent(ctx: AdminLogEventContext): AdminLogEventView | null {
+  if (ctx.normalizedPath === '/api/v1/backtest/strategies/templates') {
+    return createEventView(ctx, {
+      eventType: 'backtest_strategy_templates',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '策略模板'),
+      moduleLabel: '策略库',
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/strategies' && ctx.input.method === 'GET') {
+    return createEventView(ctx, {
+      eventType: 'backtest_strategy_list',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '自定义策略列表'),
+      moduleLabel: '策略库',
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/strategies' && ctx.input.method === 'POST') {
+    const targetLabel = extractStrategyName(ctx);
+    return createEventView(ctx, {
+      eventType: 'backtest_strategy_create',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `创建了自定义策略${targetLabel ? ` ${targetLabel}` : ''}`,
+        `创建自定义策略${targetLabel ? ` ${targetLabel}` : ''}`,
+      ),
+      moduleLabel: '策略库',
+      targetLabel,
+    });
+  }
+
+  if (/^\/api\/v1\/backtest\/strategies\/[^/]+$/.test(ctx.normalizedPath) && ctx.input.method === 'GET') {
+    const targetLabel = extractStrategyName(ctx) ?? extractStrategyId(ctx);
+    return createEventView(ctx, {
+      eventType: 'backtest_strategy_detail',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `自定义策略 ${targetLabel ?? '目标策略'}`),
+      moduleLabel: '策略库',
+      targetLabel,
+    });
+  }
+
+  if (/^\/api\/v1\/backtest\/strategies\/[^/]+$/.test(ctx.normalizedPath) && ctx.input.method === 'PATCH') {
+    const targetLabel = extractStrategyName(ctx) ?? extractStrategyId(ctx);
+    return createEventView(ctx, {
+      eventType: 'backtest_strategy_update',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `更新了自定义策略${targetLabel ? ` ${targetLabel}` : ''}`,
+        `更新自定义策略${targetLabel ? ` ${targetLabel}` : ''}`,
+      ),
+      moduleLabel: '策略库',
+      targetLabel,
+    });
+  }
+
+  if (/^\/api\/v1\/backtest\/strategies\/[^/]+$/.test(ctx.normalizedPath) && ctx.input.method === 'DELETE') {
+    const targetLabel = extractStrategyName(ctx) ?? extractStrategyId(ctx);
+    return createEventView(ctx, {
+      eventType: 'backtest_strategy_delete',
+      eventSummary: buildSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        `删除了自定义策略${targetLabel ? ` ${targetLabel}` : ''}`,
+        `删除自定义策略${targetLabel ? ` ${targetLabel}` : ''}`,
+      ),
+      moduleLabel: '策略库',
+      targetLabel,
+    });
+  }
+
+  return null;
+}
+
+function buildBacktestEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const strategyLibraryEvent = buildBacktestStrategyLibraryEvent(ctx);
+  if (strategyLibraryEvent) {
+    return strategyLibraryEvent;
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/run') {
+    const code = extractBacktestCode(ctx);
+    const evalWindowLabel = formatEvalWindowLabel(extractEvalWindowDays(ctx));
+    const subjectBase = code ? `股票 ${code} 的回测计算` : '回测计算';
+    const subject = evalWindowLabel ? `${subjectBase}（${evalWindowLabel}）` : subjectBase;
+    return createEventView(ctx, {
+      eventType: 'backtest_run',
+      eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, `发起了${subject}`, `发起${subject}`),
+      moduleLabel: '回测分析',
+      targetLabel: code ?? evalWindowLabel,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/results') {
+    const code = extractBacktestCode(ctx);
+    const subject = code ? `股票 ${code} 的回测结果列表` : '回测结果列表';
+    return createEventView(ctx, {
+      eventType: 'backtest_results',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: '回测分析',
+      targetLabel: code,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/performance') {
+    const evalWindowLabel = formatEvalWindowLabel(extractEvalWindowDays(ctx));
+    return createEventView(ctx, {
+      eventType: 'backtest_performance',
+      eventSummary: buildReadSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        evalWindowLabel ? `整体回测表现（${evalWindowLabel}）` : '整体回测表现',
+      ),
+      moduleLabel: '回测分析',
+      targetLabel: evalWindowLabel,
+    });
+  }
+
+  if (/^\/api\/v1\/backtest\/performance\/[^/]+$/.test(ctx.normalizedPath)) {
+    const code = getPathParamAfter(ctx.pathSegments, 'performance');
+    const evalWindowLabel = formatEvalWindowLabel(extractEvalWindowDays(ctx));
+    const subjectBase = `股票 ${code ?? '目标股票'} 的回测表现`;
+    return createEventView(ctx, {
+      eventType: 'backtest_stock_performance',
+      eventSummary: buildReadSummary(
+        ctx.actorLabel,
+        ctx.input.success,
+        evalWindowLabel ? `${subjectBase}（${evalWindowLabel}）` : subjectBase,
+      ),
+      moduleLabel: '回测分析',
+      targetLabel: code ?? evalWindowLabel,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/curves') {
+    const code = extractBacktestCode(ctx);
+    const scope = getQueryString(ctx, 'scope') === 'stock' && code ? `股票 ${code}` : '整体';
+    return createEventView(ctx, {
+      eventType: 'backtest_curves',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `${scope}回测收益曲线`),
+      moduleLabel: '回测分析',
+      targetLabel: code,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/distribution') {
+    const code = extractBacktestCode(ctx);
+    const scope = getQueryString(ctx, 'scope') === 'stock' && code ? `股票 ${code}` : '整体';
+    return createEventView(ctx, {
+      eventType: 'backtest_distribution',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `${scope}回测收益分布`),
+      moduleLabel: '回测分析',
+      targetLabel: code,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/compare') {
+    const code = extractBacktestCode(ctx);
+    const windows = asArray(ctx.body?.eval_window_days_list)
+      .map(item => getNumber(item))
+      .filter((item): item is number => item != null)
+      .map(item => `${item} 日`);
+    const targetLabel = windows.length > 0 ? formatList(windows) : code;
+    const subject = code ? `股票 ${code} 的回测窗口对比` : '回测窗口对比';
+    return createEventView(ctx, {
+      eventType: 'backtest_compare',
+      eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, `比较了${subject}`, `比较${subject}`),
+      moduleLabel: '回测分析',
+      targetLabel,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/strategy/run') {
+    const code = extractBacktestCode(ctx);
+    const dateRangeLabel = extractDateRangeLabel(
+      getRecordString(ctx.body, 'start_date', 'startDate'),
+      getRecordString(ctx.body, 'end_date', 'endDate'),
+    );
+    const targetLabel = formatList([code ? `股票：${code}` : '', dateRangeLabel ? `区间：${dateRangeLabel}` : '']) || null;
+    const subject = code ? `股票 ${code} 的策略回测` : '策略回测';
+    return createEventView(ctx, {
+      eventType: 'backtest_strategy_run',
+      eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, `发起了${subject}`, `发起${subject}`),
+      moduleLabel: '策略回测',
+      targetLabel,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/strategy/runs') {
+    const code = extractBacktestCode(ctx);
+    const subject = code ? `股票 ${code} 的策略回测列表` : '策略回测列表';
+    return createEventView(ctx, {
+      eventType: 'backtest_strategy_runs',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: '策略回测',
+      targetLabel: code,
+    });
+  }
+
+  if (/^\/api\/v1\/backtest\/strategy\/runs\/[^/]+$/.test(ctx.normalizedPath)) {
+    const runGroupId = extractRunGroupId(ctx);
+    return createEventView(ctx, {
+      eventType: 'backtest_strategy_run_detail',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `策略回测 ${runGroupId ?? '目标记录'} 详情`),
+      moduleLabel: '策略回测',
+      targetLabel: runGroupId,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/agent/run') {
+    const code = extractBacktestCode(ctx);
+    const dateRangeLabel = extractDateRangeLabel(
+      getRecordString(ctx.body, 'start_date', 'startDate'),
+      getRecordString(ctx.body, 'end_date', 'endDate'),
+    );
+    const targetLabel = formatList([code ? `股票：${code}` : '', dateRangeLabel ? `区间：${dateRangeLabel}` : '']) || null;
+    const subject = code ? `股票 ${code} 的 Agent 回放回测` : 'Agent 回放回测';
+    return createEventView(ctx, {
+      eventType: 'agent_backtest_run',
+      eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, `发起了${subject}`, `发起${subject}`),
+      moduleLabel: 'Agent 回放回测',
+      targetLabel,
+    });
+  }
+
+  if (ctx.normalizedPath === '/api/v1/backtest/agent/runs') {
+    const code = extractBacktestCode(ctx);
+    const statusLabel = labelStatus(getQueryString(ctx, 'status'));
+    const targetLabel = formatList([code ? `股票：${code}` : '', statusLabel ? `状态：${statusLabel}` : '']) || null;
+    const subject = code ? `股票 ${code} 的 Agent 回放记录` : 'Agent 回放记录';
+    return createEventView(ctx, {
+      eventType: 'agent_backtest_runs',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, subject),
+      moduleLabel: 'Agent 回放回测',
+      targetLabel,
+    });
+  }
+
+  if (/^\/api\/v1\/backtest\/agent\/runs\/[^/]+$/.test(ctx.normalizedPath)) {
+    const runGroupId = extractRunGroupId(ctx);
+    return createEventView(ctx, {
+      eventType: 'agent_backtest_run_detail',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `Agent 回放回测 ${runGroupId ?? '目标记录'} 详情`),
+      moduleLabel: 'Agent 回放回测',
+      targetLabel: runGroupId,
+    });
+  }
+
+  return createEventView(ctx, {
+    eventType: 'backtest_generic',
+    eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '回测分析'),
+    moduleLabel: '回测分析',
+    targetLabel: extractBacktestCode(ctx),
+  });
+}
+
+function buildFallbackEvent(ctx: AdminLogEventContext): AdminLogEventView {
+  const moduleLabel = resolveModuleLabel(ctx.input.moduleCode);
+
+  let eventType = 'generic_action';
+  let successText = `处理了${moduleLabel}`;
+  let failureText = `处理${moduleLabel}`;
+
+  if (['GET', 'HEAD', 'OPTIONS'].includes(ctx.input.method)) {
+    eventType = 'generic_view';
+    successText = `查看了${moduleLabel}`;
+    failureText = `查看${moduleLabel}`;
+  } else if (ctx.input.method === 'POST') {
+    eventType = 'generic_submit';
+    successText = `提交了${moduleLabel}相关操作`;
+    failureText = `提交${moduleLabel}相关操作`;
+  } else if (ctx.input.method === 'PUT' || ctx.input.method === 'PATCH') {
+    eventType = 'generic_update';
+    successText = `更新了${moduleLabel}`;
+    failureText = `更新${moduleLabel}`;
+  } else if (ctx.input.method === 'DELETE') {
+    eventType = 'generic_delete';
+    successText = `删除了${moduleLabel}相关内容`;
+    failureText = `删除${moduleLabel}相关内容`;
+  }
+
+  return createEventView(ctx, {
+    eventType,
+    eventSummary: buildSummary(ctx.actorLabel, ctx.input.success, successText, failureText),
     moduleLabel,
-    resultLabel: input.success ? '成功' : '失败',
-    targetLabel: null,
-    actorLabel,
-    username: resolveUsername(input),
-  };
+  });
 }
 
+// 顶层分发器按路径前缀把请求路由到各模块专属的“可读化规则”，避免一个巨大 if 分支里混杂全部业务。
 export function buildAdminLogEventView(input: AdminLogEventInput, lookup: AdminLogEventLookup = {}): AdminLogEventView {
-  const actorLabel = resolveActorLabel(input);
-  const normalizedPath = normalizePath(input.path);
+  const ctx = createContext(input);
 
-  if (normalizedPath === '/api/v1/analysis/analyze') {
-    return buildAnalysisEvent(input, actorLabel);
+  if (ctx.normalizedPath.startsWith('/api/v1/analysis')) {
+    return buildAnalysisEvent(ctx);
   }
-  if (normalizedPath === '/api/v1/users/me/trading/funds/add') {
-    return buildFundsEvent(input, actorLabel);
+  if (ctx.normalizedPath.startsWith('/api/v1/users/me/simulation-account')) {
+    return buildBrokerAccountEvent(ctx);
   }
-  if (normalizedPath === '/api/v1/users/me/trading/orders') {
-    return buildPlaceOrderEvent(input, actorLabel);
+  if (ctx.normalizedPath.startsWith('/api/v1/users/me/trading')) {
+    return buildTradingAccountEvent(ctx);
   }
-  if (normalizedPath === '/api/v1/users/me/trading/orders/cancel') {
-    return buildCancelOrderEvent(input, actorLabel);
+  if (ctx.normalizedPath.startsWith('/api/v1/users/me/settings')) {
+    return buildUserSettingsEvent(ctx);
   }
-  if (normalizedPath.startsWith('/api/v1/admin/users')) {
-    return buildAdminUserEvent(input, actorLabel, lookup);
+  if (ctx.normalizedPath.startsWith('/api/v1/stocks')) {
+    return buildStocksEvent(ctx);
   }
-  if (normalizedPath.startsWith('/api/v1/system/config')) {
-    return buildSystemConfigEvent(input, actorLabel);
+  if (ctx.normalizedPath.startsWith('/api/v1/history')) {
+    return buildHistoryEvent(ctx);
   }
-  if (normalizedPath.startsWith('/api/v1/auth/')) {
-    return buildAuthEvent(input, actorLabel);
+  if (ctx.normalizedPath.startsWith('/api/v1/admin/users')) {
+    return buildAdminUserEvent(ctx, lookup);
+  }
+  if (ctx.normalizedPath.startsWith('/api/v1/admin/roles')) {
+    return buildAdminRoleEvent(ctx);
+  }
+  if (ctx.normalizedPath.startsWith('/api/v1/admin/logs')) {
+    return buildAdminLogEvent(ctx);
+  }
+  if (ctx.normalizedPath.startsWith('/api/v1/system/config')) {
+    return buildSystemConfigEvent(ctx);
+  }
+  if (ctx.normalizedPath.startsWith('/api/v1/backtest')) {
+    return buildBacktestEvent(ctx);
+  }
+  if (ctx.normalizedPath.startsWith('/api/v1/auth')) {
+    return buildAuthEvent(ctx);
   }
 
-  return buildFallbackEvent(input, actorLabel);
+  return buildFallbackEvent(ctx);
 }
 
 export function matchesAdminLogKeyword(view: AdminLogEventView, keyword: string, path: string): boolean {
@@ -596,6 +1782,7 @@ export function matchesAdminLogKeyword(view: AdminLogEventView, keyword: string,
     view.resultLabel,
     view.targetLabel,
     normalizePath(path),
+    view.eventType,
   ].some(text => asString(text).toLowerCase().includes(normalizedKeyword));
 }
 

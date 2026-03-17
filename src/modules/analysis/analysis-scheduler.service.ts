@@ -1,3 +1,5 @@
+/** 股票分析模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import { Injectable } from '@nestjs/common';
 import { AnalysisTaskStatus, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -102,6 +104,7 @@ function normalizeTaskSortStatus(status: AnalysisTaskStatus): number {
   return 4;
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class AnalysisSchedulerService {
   constructor(
@@ -298,6 +301,7 @@ export class AnalysisSchedulerService {
       message: string;
     },
   ): Promise<Record<string, unknown>> {
+    // retry / rerun 都会新建任务，避免覆盖原始记录并保留完整任务链供排障使用。
     await this.ensureNoActiveSiblingTask(source);
     const requestPayload = await this.rebuildRequestPayload(source);
     const taskId = randomUUID().replace(/-/g, '');
@@ -336,6 +340,7 @@ export class AnalysisSchedulerService {
     };
   }
 
+  // 先按数据库字段过滤，再补 execution_mode / staleOnly 等派生条件，避免 JSON 查询过于脆弱。
   async listTasks(query: SchedulerTaskListQuery, scope: RequesterScope): Promise<Record<string, unknown>> {
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
@@ -511,6 +516,7 @@ export class AnalysisSchedulerService {
     };
   }
 
+  // health 同时聚合 Backend、Agent、Worker 心跳和队列指标，便于一个接口完成调度排障。
   async getHealth(): Promise<Record<string, unknown>> {
     const now = new Date();
     const heartbeat = await this.prisma.schedulerWorkerHeartbeat.findUnique({
@@ -579,6 +585,7 @@ export class AnalysisSchedulerService {
     };
   }
 
+  // retry 仍然沿用原 rootTaskId，语义上表示“这次失败了，再试一次”。
   async retryTask(taskId: string, scope: RequesterScope): Promise<Record<string, unknown> | null> {
     const source = await this.loadTaskWithScope(taskId, scope);
     if (!source) {
@@ -596,6 +603,7 @@ export class AnalysisSchedulerService {
     });
   }
 
+  // rerun 会开启新根任务链，语义上表示“把这只股票重新完整分析一遍”。
   async rerunTask(taskId: string, scope: RequesterScope): Promise<Record<string, unknown> | null> {
     const source = await this.loadTaskWithScope(taskId, scope);
     if (!source) {
@@ -643,6 +651,7 @@ export class AnalysisSchedulerService {
     };
   }
 
+  // 优先级只允许作用于 pending 任务，避免运行中的任务被外部请求突然插队。
   async updatePriority(
     taskId: string,
     priorityValue: unknown,
@@ -693,6 +702,7 @@ export class AnalysisSchedulerService {
     };
   }
 
+  // 心跳使用 upsert，确保 worker 首次上线和后续续命都落到同一条记录里。
   async updateWorkerHeartbeat(input: HeartbeatUpdateInput): Promise<void> {
     await this.prisma.schedulerWorkerHeartbeat.upsert({
       where: { workerName: input.workerName },

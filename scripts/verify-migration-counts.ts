@@ -1,3 +1,5 @@
+/** 核对迁移前后核心表的数据量，避免大规模迁移时静默丢数。 */
+
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';

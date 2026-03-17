@@ -1,3 +1,5 @@
+/** 把历史 SQLite 数据迁移到 PostgreSQL，并在迁移过程中补齐兼容字段与关联关系。 */
+
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -26,6 +28,7 @@ finally:
     conn.close()
 `;
 
+// 历史环境不强依赖本地 sqlite 驱动；用 python3 兜底读取，减少迁移脚本的宿主依赖。
 class PySqliteDatabase {
   constructor(private readonly dbPath: string) {}
 
@@ -46,10 +49,11 @@ class PySqliteDatabase {
   }
 
   close(): void {
-    // No persistent handle to close in Python-backed adapter.
+    // Python 子进程每次查询后都会自行退出，这个适配层没有需要长期持有的连接句柄。
   }
 }
 
+// 迁移脚本和服务入口共用 ENV_FILE 约定，避免迁移时接到错误数据库。
 function setupEnv(): void {
   const envFile = process.env.ENV_FILE ? path.resolve(process.env.ENV_FILE) : path.resolve(process.cwd(), '.env');
   if (fs.existsSync(envFile)) {
@@ -57,6 +61,7 @@ function setupEnv(): void {
   }
 }
 
+// checkpoint 让迁移脚本具备断点续跑能力，大表中途中断后无需从头扫。
 async function getCheckpoint(prisma: PrismaClient, key: string): Promise<number> {
   const row = await prisma.migrationCheckpoint.findUnique({ where: { key } });
   if (!row) return 0;
@@ -72,6 +77,7 @@ async function setCheckpoint(prisma: PrismaClient, key: string, value: number): 
   });
 }
 
+// 所有大表统一按自增 id 分批迁移，既控制单次事务体积，也方便结合 checkpoint 恢复。
 function readBatch(db: any, table: string, lastId: number, batchSize: number): SQLiteRow[] {
   const stmt = db.prepare(`SELECT * FROM ${table} WHERE id > ? ORDER BY id ASC LIMIT ?`);
   return stmt.all(lastId, batchSize) as SQLiteRow[];
@@ -510,6 +516,7 @@ async function main(): Promise<void> {
   const batchSize = 500;
 
   try {
+    // 每张表都先探测是否存在，兼容历史 SQLite 版本表结构不完全一致的情况。
     if (tableExists(sqlite, 'analysis_history')) {
       await migrateAnalysisHistory(prisma, sqlite, batchSize);
       await syncSequence(prisma, 'analysis_history');

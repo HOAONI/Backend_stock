@@ -1,3 +1,5 @@
+/** 回测模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
+
 import * as crypto from 'node:crypto';
 
 import { Injectable, Logger } from '@nestjs/common';
@@ -176,6 +178,7 @@ function createSchemaNotReadyError(tableName: string): Error & {
   return error;
 }
 
+/** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class AgentBacktestService {
   private readonly logger = new Logger(AgentBacktestService.name);
@@ -187,6 +190,7 @@ export class AgentBacktestService {
     private readonly aiRuntimeService: AiRuntimeService = {} as AiRuntimeService,
   ) {}
 
+  // Agent 回放回测依赖一组独立的持久化表，启动前先显式校验，避免中途跑到一半才发现表缺失。
   private async assertStorageReady(): Promise<void> {
     const readiness = await getAgentBacktestStorageReadiness(this.prisma);
     if (readiness.ready) {
@@ -637,6 +641,7 @@ export class AgentBacktestService {
     };
   }
 
+  // Agent 返回结构会随着 phase 不同而略有差异，这里统一规整成 Backend 持久化使用的标准形态。
   private normalizeResult(payload: Record<string, unknown>, phase: 'fast' | 'refine'): AgentBacktestNormalizedResult {
     const requestedRange = asRecord(payload.requested_range);
     const effectiveRange = asRecord(payload.effective_range);
@@ -1427,6 +1432,7 @@ export class AgentBacktestService {
     };
   }
 
+  // refine worker 通过“先挑一条 fast、再条件更新加锁”的方式串行补精修，避免多实例重复精修同一组结果。
   async processNextRefineJob(): Promise<boolean> {
     if (!(await this.isStorageReady())) {
       return false;
@@ -1490,6 +1496,7 @@ export class AgentBacktestService {
         signalProfileHash: config.signal_profile_hash,
         snapshotVersion: config.snapshot_version,
       });
+      // 如果 fast 阶段要求精修时使用个人 AI，则这里必须再次回源真实 token，不能静默回退系统默认模型。
       const runtimeLlmPayload = row.owner_user_id != null
         ? await this.resolveRefineRuntimeLlmPayload(row.owner_user_id, config.runtime_llm_source)
         : null;

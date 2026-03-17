@@ -1,3 +1,5 @@
+/** 认证与审计基础设施的中间件实现，在请求进入业务层前统一处理上下文。 */
+
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'node:crypto';
@@ -26,6 +28,7 @@ function summarizeFile(file: Express.Multer.File): Record<string, unknown> {
   };
 }
 
+// 审计日志会尽量保留结构，但要递归遮蔽敏感字段，避免把口令、token 等原样落库。
 function maskValue(value: unknown, seen: WeakSet<object>): unknown {
   if (value == null) {
     return value;
@@ -144,6 +147,7 @@ function buildBodySummary(req: Request): Record<string, unknown> | null {
   return Object.keys(summary).length > 0 ? summary : null;
 }
 
+/** 负责在请求进入控制器前统一补齐上下文、鉴权或审计信息。 */
 @Injectable()
 export class AuditLogMiddleware implements NestMiddleware {
   constructor(private readonly prisma: PrismaService) {}
@@ -160,6 +164,7 @@ export class AuditLogMiddleware implements NestMiddleware {
 
     let responsePayload: unknown = undefined;
 
+    // 通过包一层 json/send，把最终返回给客户端的 payload 抓下来做审计摘要。
     const originalJson = res.json.bind(res);
     res.json = ((body: unknown) => {
       responsePayload = body;
@@ -201,7 +206,7 @@ export class AuditLogMiddleware implements NestMiddleware {
       };
 
       void this.prisma.adminAuditLog.create({ data }).catch(() => {
-        // ignore audit log persistence failures
+        // 审计写库失败不能反向影响主请求，否则后台在数据库抖动时会被日志链路拖死。
       });
     });
 

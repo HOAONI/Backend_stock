@@ -1,3 +1,5 @@
+/** 后台认证模块的控制器入口，负责承接 HTTP 请求并把权限后的参数转发到服务层。 */
+
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, Res } from '@nestjs/common';
 import { Request, Response } from 'express';
 
@@ -13,10 +15,12 @@ import {
 import { AuthService } from './auth.service';
 import { ChangePasswordRequestDto, LoginRequestDto, RegisterRequestDto } from './auth.dto';
 
+/** 负责定义该领域的 HTTP 接口边界，把鉴权后的请求参数整理成服务层可消费的输入。 */
 @Controller('/api/v1/auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  // 状态接口要兼容“认证未启用”和“认证已启用但未登录”两种场景，方便前端首屏判断分支。
   @Get('/status')
   async status(@Req() req: Request): Promise<Record<string, unknown>> {
     const authEnabled = isAuthEnabled();
@@ -45,6 +49,7 @@ export class AuthController {
     };
   }
 
+  // 登录成功后立即写入服务端 session，并把签名后的 sessionId 放进 HttpOnly Cookie。
   @Post('/login')
   async login(@Req() req: Request, @Res() res: Response, @Body() body: LoginRequestDto): Promise<void> {
     if (!isAuthEnabled()) {
@@ -101,6 +106,7 @@ export class AuthController {
     });
     const cookieValue = signSessionPayload(sessionId, Math.floor(expiresAt.getTime() / 1000));
 
+    // 反向代理场景下要优先信任 x-forwarded-proto，否则 HTTPS 下 cookie secure 会误判。
     const secure = (process.env.TRUST_X_FORWARDED_FOR ?? 'false').toLowerCase() === 'true'
       ? String(req.headers['x-forwarded-proto'] ?? '').toLowerCase() === 'https'
       : req.protocol === 'https';
@@ -119,6 +125,7 @@ export class AuthController {
     });
   }
 
+  // 自注册成功后沿用登录流程直接发放 session，减少新用户还要再登录一次的摩擦。
   @Post('/register')
   async register(@Req() req: Request, @Res() res: Response, @Body() body: RegisterRequestDto): Promise<void> {
     if (!isAuthEnabled()) {
@@ -218,6 +225,7 @@ export class AuthController {
     });
   }
 
+  // 改密接口要求当前会话仍然有效，防止前端拿旧页面直接绕过重新登录流程。
   @Post('/change-password')
   async changePassword(@Body() body: ChangePasswordRequestDto, @Req() req: Request, @Res() res: Response): Promise<void> {
     if (!isAuthEnabled()) {
@@ -262,6 +270,7 @@ export class AuthController {
   @Post('/logout')
   @HttpCode(HttpStatus.NO_CONTENT)
   async logout(@Req() req: Request, @Res() res: Response): Promise<void> {
+    // 即使 cookie 已过期或被篡改，也要尽量清掉客户端 cookie，避免前端停留在脏状态。
     const cookieValue = String(req.cookies?.[COOKIE_NAME] ?? '');
     const verified = verifySessionCookie(cookieValue);
     if (verified.valid && verified.sessionId) {

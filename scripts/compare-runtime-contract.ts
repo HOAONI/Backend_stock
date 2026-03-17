@@ -1,3 +1,5 @@
+/** 比对运行时数据库结构与预期契约，提前发现环境漂移或字段缺失。 */
+
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 

@@ -1,3 +1,5 @@
+/** 健康检查烟测，确保最小 Nest 应用在未挂业务依赖时也能正常响应存活探针。 */
+
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';

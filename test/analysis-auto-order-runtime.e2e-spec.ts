@@ -1,7 +1,10 @@
+/** 分析执行链路单测，重点守护 runtime_config 前传和自动下单补偿的关键边界。 */
+
 import { AnalysisService } from '../src/modules/analysis/analysis.service';
 import { TaskWorkerService } from '../src/common/worker/task-worker.service';
 import { TradingAccountService } from '../src/modules/trading-account/trading-account.service';
 
+// 把 Agent 结果映射固定住，让测试聚焦在 runtime_config 与自动单保护逻辑，而不是报告内容细节。
 jest.mock('../src/modules/analysis/analysis.mapper', () => ({
   mapAgentRunToAnalysis: jest.fn(() => ({
     queryId: 'q-test',
@@ -29,6 +32,7 @@ jest.mock('../src/modules/analysis/analysis.mapper', () => ({
 }));
 
 describe('Runtime config forwarding and auto-order guards', () => {
+  // 默认返回一份“个人 AI 可用”的解析结果，具体分支通过 override 覆盖。
   const createAiRuntimeService = (override?: Record<string, unknown>) => ({
     resolveEffectiveLlmFromProfile: jest.fn(async () => ({
       source: 'personal',

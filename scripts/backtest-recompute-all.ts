@@ -1,3 +1,5 @@
+/** 批量重算历史回测结果，适合在规则或指标版本变更后统一回刷。 */
+
 import { NestFactory } from '@nestjs/core';
 
 import { AppModule } from '@/app.module';
