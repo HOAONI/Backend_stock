@@ -87,7 +87,7 @@ function createPersonalCryptoMock(overrides?: Partial<{
   return {
     getStatus: jest.fn(() => ({ available: true, issue: '' })),
     encrypt: jest.fn(() => ({ ciphertext: 'cipher', iv: 'iv', tag: 'tag' })),
-    decrypt: jest.fn(),
+    decrypt: jest.fn(() => 'stored-personal-token'),
     ...overrides,
   };
 }
@@ -116,6 +116,9 @@ describe('UserSettingsService', () => {
     expect(payload.ai.personalModel).toBe('Qwen/Qwen3-32B');
     expect(payload.ai.source).toBe('system');
     expect(payload.ai.hasToken).toBe(false);
+    expect(payload.ai.apiToken).toBe('');
+    expect(payload.ai.apiTokenReadable).toBe(true);
+    expect(payload.ai.apiTokenReadIssue).toBe('');
     expect(payload.ai.personalBindingAvailable).toBe(true);
     expect(payload.ai.personalBindingIssue).toBe('');
   });
@@ -137,7 +140,9 @@ describe('UserSettingsService', () => {
         update: jest.fn(async () => updated),
       },
     } as any;
-    const personalCrypto = createPersonalCryptoMock();
+    const personalCrypto = createPersonalCryptoMock({
+      decrypt: jest.fn(() => 'silicon-key-1234567890'),
+    });
     const service = new UserSettingsService(prisma, personalCrypto as any, createAiRuntimeMock() as any);
 
     const payload = await service.updateMySettings(7, {
@@ -158,9 +163,17 @@ describe('UserSettingsService', () => {
     expect(payload.ai.personalProvider).toBe('siliconflow');
     expect(payload.ai.personalModel).toBe('Qwen/Qwen3-32B');
     expect(payload.ai.source).toBe('personal');
+    expect(payload.ai.apiToken).toBe('silicon-key-1234567890');
+    expect(payload.ai.apiTokenReadable).toBe(true);
+    expect(payload.ai.apiTokenReadIssue).toBe('');
     expect(payload.ai.apiTokenMasked).toBe('******');
     expect(payload.ai.personalBindingAvailable).toBe(true);
     expect(personalCrypto.encrypt).toHaveBeenCalledWith('silicon-key-1234567890');
+    expect(personalCrypto.decrypt).toHaveBeenCalledWith({
+      ciphertext: 'cipher',
+      iv: 'iv',
+      tag: 'tag',
+    });
   });
 
   it('clears stored SiliconFlow model fields when switching back to OpenAI', async () => {
@@ -210,6 +223,9 @@ describe('UserSettingsService', () => {
     expect(payload.ai.personalProvider).toBe('openai');
     expect(payload.ai.personalModel).toBe('');
     expect(payload.ai.source).toBe('system');
+    expect(payload.ai.apiToken).toBe('');
+    expect(payload.ai.apiTokenReadable).toBe(true);
+    expect(payload.ai.apiTokenReadIssue).toBe('');
   });
 
   it('keeps simulation and strategy fields untouched when only ai payload is submitted', async () => {
@@ -280,6 +296,8 @@ describe('UserSettingsService', () => {
       stopLossPct: 6,
       takeProfitPct: 20,
     });
+    expect(payload.ai.apiToken).toBe('stored-personal-token');
+    expect(payload.ai.apiTokenReadable).toBe(true);
   });
 
   it('reports personal binding availability when PERSONAL_SECRET_KEY is configured', async () => {
@@ -353,5 +371,34 @@ describe('UserSettingsService', () => {
 
     expect(payload.ai.personalBindingAvailable).toBe(false);
     expect(payload.ai.personalBindingIssue).toContain('PERSONAL_SECRET_KEY');
+  });
+
+  it('keeps settings page readable when stored personal token cannot be decrypted', async () => {
+    const prisma = {
+      adminUserProfile: {
+        upsert: jest.fn(async () => createProfile({
+          aiProvider: 'openai',
+          aiTokenCiphertext: 'cipher',
+          aiTokenIv: 'iv',
+          aiTokenTag: 'tag',
+        })),
+      },
+    } as any;
+    const service = new UserSettingsService(
+      prisma,
+      createPersonalCryptoMock({
+        decrypt: jest.fn(() => {
+          throw new Error('decrypt failed');
+        }),
+      }) as any,
+      createAiRuntimeMock() as any,
+    );
+
+    const payload = await service.getMySettings(7) as Record<string, any>;
+
+    expect(payload.ai.hasToken).toBe(true);
+    expect(payload.ai.apiToken).toBe('');
+    expect(payload.ai.apiTokenReadable).toBe(false);
+    expect(payload.ai.apiTokenReadIssue).toContain('PERSONAL_SECRET_KEY');
   });
 });

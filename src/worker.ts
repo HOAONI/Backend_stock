@@ -9,6 +9,7 @@ import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 
 import { AgentBacktestWorkerService } from './common/worker/agent-backtest-worker.service';
+import { StrategyBacktestAiWorkerService } from './common/worker/strategy-backtest-ai-worker.service';
 import { TaskWorkerService } from './common/worker/task-worker.service';
 import { WorkerModule } from './common/worker/worker.module';
 
@@ -32,6 +33,7 @@ async function bootstrapWorker(): Promise<void> {
   const services = [
     app.get(TaskWorkerService),
     app.get(AgentBacktestWorkerService),
+    app.get(StrategyBacktestAiWorkerService),
   ];
 
   // 统一在信号处理里先停轮询，再关闭 Nest 上下文，避免中途退出留下半处理任务。

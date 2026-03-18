@@ -20,6 +20,7 @@ function createServiceError(code: string, message: string): ServiceError {
 
 const MASKED_TOKEN = '******';
 const DEFAULT_PERSONAL_PROVIDER = 'deepseek';
+const PERSONAL_TOKEN_READ_FAILURE_MESSAGE = '当前保存的个人 API Key 无法回显，请重新输入并保存；如问题持续，请检查 Backend_stock/.env 中的 PERSONAL_SECRET_KEY 配置。';
 
 function cleanText(value: unknown): string {
   return String(value ?? '').trim();
@@ -31,6 +32,12 @@ function truncateText(value: string, maxLength: number): string {
   }
   return value.slice(0, maxLength);
 }
+
+type StoredPersonalTokenState = {
+  apiToken: string;
+  apiTokenReadable: boolean;
+  apiTokenReadIssue: string;
+};
 
 /** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
@@ -60,12 +67,49 @@ export class UserSettingsService {
     return cleanText(profile.aiModel) || DEFAULT_SILICONFLOW_MODEL;
   }
 
+  private readStoredPersonalToken(profile: Awaited<ReturnType<typeof this.ensureProfile>>): StoredPersonalTokenState {
+    if (!profile.aiTokenCiphertext) {
+      return {
+        apiToken: '',
+        apiTokenReadable: true,
+        apiTokenReadIssue: '',
+      };
+    }
+
+    if (!profile.aiTokenIv || !profile.aiTokenTag) {
+      return {
+        apiToken: '',
+        apiTokenReadable: false,
+        apiTokenReadIssue: PERSONAL_TOKEN_READ_FAILURE_MESSAGE,
+      };
+    }
+
+    try {
+      return {
+        apiToken: this.personalCrypto.decrypt({
+          ciphertext: profile.aiTokenCiphertext,
+          iv: profile.aiTokenIv,
+          tag: profile.aiTokenTag,
+        }),
+        apiTokenReadable: true,
+        apiTokenReadIssue: '',
+      };
+    } catch {
+      return {
+        apiToken: '',
+        apiTokenReadable: false,
+        apiTokenReadIssue: PERSONAL_TOKEN_READ_FAILURE_MESSAGE,
+      };
+    }
+  }
+
   private async toPayload(profile: Awaited<ReturnType<typeof this.ensureProfile>>): Promise<Record<string, unknown>> {
     const resolvedLlm = await this.aiRuntimeService.resolveEffectiveLlmFromProfile(profile, {
       includeApiToken: false,
       requireSystemDefault: false,
     });
     const personalBindingStatus = this.getPersonalBindingStatus();
+    const storedPersonalToken = this.readStoredPersonalToken(profile);
 
     return {
       simulation: {
@@ -81,6 +125,9 @@ export class UserSettingsService {
         baseUrl: resolvedLlm.effective.baseUrl,
         model: resolvedLlm.effective.model,
         hasToken: Boolean(profile.aiTokenCiphertext),
+        apiToken: storedPersonalToken.apiToken,
+        apiTokenReadable: storedPersonalToken.apiTokenReadable,
+        apiTokenReadIssue: storedPersonalToken.apiTokenReadIssue,
         apiTokenMasked: profile.aiTokenCiphertext ? MASKED_TOKEN : '',
         source: resolvedLlm.source,
         hasSystemToken: resolvedLlm.hasSystemToken,

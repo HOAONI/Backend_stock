@@ -18,6 +18,12 @@ import { HealthController } from '../src/modules/health/health.controller';
 import { BacktestService } from '../src/modules/backtest/backtest.service';
 import { UserBacktestStrategyService } from '../src/modules/backtest/user-backtest-strategy.service';
 
+function createAgentInterpretationServiceMock() {
+  return {
+    ensureAgentRunGroupInterpretation: jest.fn(async () => {}),
+  };
+}
+
 describe('Backtest compare validation and forwarding', () => {
   describe('BacktestCompareRequestDto', () => {
     it('accepts valid strategy_codes and backward-compatible payload', () => {
@@ -192,7 +198,11 @@ describe('Backtest compare validation and forwarding', () => {
           },
         ],
       }));
-      const service = new BacktestService(prisma as any, { compare } as any, {} as any);
+      const service = new BacktestService(
+        prisma as any,
+        { compare } as any,
+        {} as any,
+      );
 
       // 这里既校验筛出来的样本行结构，也校验 compare Agent 接收到的 rows_by_window 形状。
       const response = await service.compareWindows({
@@ -249,7 +259,11 @@ describe('Backtest compare validation and forwarding', () => {
       };
 
       const compare = jest.fn(async (_payload: Record<string, unknown>) => ({ items: [] }));
-      const service = new BacktestService(prisma as any, { compare } as any, {} as any);
+      const service = new BacktestService(
+        prisma as any,
+        { compare } as any,
+        {} as any,
+      );
 
       await service.compareWindows({
         evalWindowDaysList: [5],
@@ -336,6 +350,9 @@ describe('Backtest compare validation and forwarding', () => {
         id: 1001,
         code: '600519',
         engineVersion: 'backtrader_v1',
+        aiInterpretationStatus: 'pending',
+        aiInterpretationErrorMessage: null,
+        aiInterpretationCompletedAt: null,
         startDate: new Date('2024-01-01T00:00:00Z'),
         endDate: new Date('2024-12-31T00:00:00Z'),
         effectiveStartDate: new Date('2024-01-02T00:00:00Z'),
@@ -434,15 +451,115 @@ describe('Backtest compare validation and forwarding', () => {
       expect(response).toMatchObject({
         run_group_id: 1001,
         code: '600519',
+        ai_interpretation_status: 'pending',
         items: [
           expect.objectContaining({
             strategy_id: 88,
             strategy_name: 'Fast MA',
             template_code: 'ma_cross',
-            template_name: 'MA Cross',
+            template_name: 'MA 交叉',
           }),
         ],
         legacy_event_backtest: false,
+      });
+    });
+
+    it('returns persisted ai job status on detail view and history list', async () => {
+      const findFirst = jest.fn(async () => ({
+        id: 1001,
+        code: '600519',
+        engineVersion: 'backtrader_v1',
+        aiInterpretationStatus: 'pending',
+        aiInterpretationErrorMessage: null,
+        aiInterpretationCompletedAt: null,
+        startDate: new Date('2024-01-01T00:00:00Z'),
+        endDate: new Date('2024-12-31T00:00:00Z'),
+        effectiveStartDate: new Date('2024-01-02T00:00:00Z'),
+        effectiveEndDate: new Date('2024-12-31T00:00:00Z'),
+        createdAt: new Date('2026-03-05T00:00:00Z'),
+        runs: [
+          {
+            id: 2001,
+            savedStrategyId: 88,
+            savedStrategyName: 'Fast MA',
+            strategyCode: 'ma_cross',
+            strategyVersion: 'v1',
+            paramsJson: { maWindow: 10 },
+            metricsJson: { total_return_pct: 12.3 },
+            benchmarkJson: { total_return_pct: 8.1 },
+            trades: [],
+            equityPoints: [],
+          },
+        ],
+      }));
+      const count = jest.fn(async () => 1);
+      const findMany = jest.fn(async () => ([
+        {
+          id: 1001,
+          code: '600519',
+          engineVersion: 'backtrader_v1',
+          aiInterpretationStatus: 'pending',
+          aiInterpretationErrorMessage: null,
+          aiInterpretationCompletedAt: null,
+          startDate: new Date('2024-01-01T00:00:00Z'),
+          endDate: new Date('2024-12-31T00:00:00Z'),
+          effectiveStartDate: new Date('2024-01-02T00:00:00Z'),
+          effectiveEndDate: new Date('2024-12-31T00:00:00Z'),
+          createdAt: new Date('2026-03-05T00:00:00Z'),
+          runs: [
+            {
+              id: 2001,
+              savedStrategyId: 88,
+              savedStrategyName: 'Fast MA',
+              strategyCode: 'ma_cross',
+              strategyVersion: 'v1',
+              metricsJson: { total_return_pct: 12.3 },
+            },
+          ],
+        },
+      ]));
+
+      const service = new BacktestService(
+        {
+          strategyBacktestRunGroup: { findFirst, count, findMany },
+        } as any,
+        {} as any,
+        {} as any,
+      );
+
+      const detail = await service.getStrategyRunDetail({
+        runGroupId: 1001,
+        requester: { userId: 9, includeAll: false },
+      });
+      const history = await service.listStrategyRuns({
+        page: 1,
+        limit: 20,
+        requester: { userId: 9, includeAll: false },
+      });
+
+      expect(detail).toMatchObject({
+        ai_interpretation_status: 'pending',
+        items: [
+          {
+            metrics: {
+              total_return_pct: 12.3,
+            },
+          },
+        ],
+      });
+      expect(history).toMatchObject({
+        items: [
+          {
+            ai_interpretation_status: 'pending',
+            strategies: [
+              {
+                metrics: {
+                  total_return_pct: 12.3,
+                },
+              },
+            ],
+          },
+        ],
       });
     });
   });
@@ -490,7 +607,7 @@ describe('Backtest compare validation and forwarding', () => {
         id: 9,
         name: 'RSI Swing',
         template_code: 'rsi_threshold',
-        template_name: 'RSI Threshold',
+        template_name: 'RSI 阈值',
       });
     });
 
@@ -541,7 +658,7 @@ describe('Backtest compare validation and forwarding', () => {
           strategyId: 5,
           strategyName: 'Fast MA',
           templateCode: 'ma_cross',
-          templateName: 'MA Cross',
+          templateName: 'MA 交叉',
           params: { maWindow: 10 },
         },
       ]);
@@ -685,6 +802,8 @@ describe('Backtest compare validation and forwarding', () => {
         { $queryRawUnsafe } as any,
         {} as any,
         {} as any,
+        {} as any,
+        createAgentInterpretationServiceMock() as any,
       );
 
       await expect(

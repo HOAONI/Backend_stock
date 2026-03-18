@@ -224,6 +224,13 @@ model StrategyBacktestRunGroup {
   effectiveStartDate DateTime? @map("effective_start_date") @db.Date
   effectiveEndDate   DateTime? @map("effective_end_date") @db.Date
   engineVersion      String    @default("backtrader_v1") @map("engine_version") @db.VarChar(32)
+  aiInterpretationStatus       String    @default("pending") @map("ai_interpretation_status") @db.VarChar(16)
+  aiInterpretationAttempts     Int       @default(0) @map("ai_interpretation_attempts")
+  aiInterpretationRequestedAt  DateTime? @map("ai_interpretation_requested_at")
+  aiInterpretationStartedAt    DateTime? @map("ai_interpretation_started_at")
+  aiInterpretationCompletedAt  DateTime? @map("ai_interpretation_completed_at")
+  aiInterpretationNextRetryAt  DateTime? @map("ai_interpretation_next_retry_at")
+  aiInterpretationErrorMessage String?   @map("ai_interpretation_error_message")
   createdAt          DateTime  @default(now()) @map("created_at")
 
   ownerUser          AdminUser?            @relation("StrategyBacktestRunGroupOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
@@ -231,6 +238,7 @@ model StrategyBacktestRunGroup {
 
   @@index([ownerUserId, createdAt], map: "ix_strategy_backtest_group_owner_created")
   @@index([code, startDate, endDate], map: "ix_strategy_backtest_group_code_range")
+  @@index([aiInterpretationStatus, aiInterpretationNextRetryAt, createdAt], map: "ix_strategy_backtest_group_ai_status_retry_created")
   @@map("strategy_backtest_run_groups")
 }
 

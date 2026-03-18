@@ -24,15 +24,30 @@ pnpm db:init
 pnpm start:dev:all
 ```
 
-`start:dev:all` 会在同一进程启 API + Worker。
+`start:dev:all` 会在同一进程启 API + Worker，适合只运行 `Backend_stock`。
 
-若通过项目根目录的一键脚本启动：
+若需要一键启动整套系统（`Agent_stock` + `Backend_stock` + `Frontend_stock`），请回到仓库根目录执行：
 
 ```bash
-bash ../scripts/system/start.sh
+cd ..
+bash scripts/system/start.sh
+# 或使用 backend 开发模式（支持热更新）
+bash scripts/system/start.sh --dev-backend
 ```
 
-脚本会先按当前 `.env` 中的 `DATABASE_URL` 自动补齐 schema，再启动三服务；不会复用 `db:init`，也不会改写现有连接串。若本地库存在历史 `db push` 痕迹或未完成的 Prisma migration，脚本会自动切到兼容的 schema 同步方式。成功时控制台保持简洁输出，详细数据库预处理日志写入 `/tmp/stocksim/logs/backend-db-prepare.log`。
+根目录系统脚本会先按当前 `Backend_stock/.env` 中的 `DATABASE_URL` 自动补齐 schema，再启动三服务；不会复用 `db:init`，也不会改写现有连接串。若本地库存在历史 `db push` 痕迹或未完成的 Prisma migration，脚本会自动切到兼容的 schema 同步方式。成功时控制台保持简洁输出，详细数据库预处理日志写入 `/tmp/stocksim/logs/backend-db-prepare.log`。
+
+停止整套系统：
+
+```bash
+cd ..
+bash scripts/system/stop.sh
+```
+
+命令分层：
+
+- `start:*` 用于 `Backend_stock` 进程级入口（API / Worker）。
+- 根目录 `scripts/system/*.sh` 用于整套系统入口（Agent + Backend + Frontend）。
 
 若数据库是已存在实例且未跑 `db:init`，至少先执行一次：
 
@@ -147,7 +162,7 @@ pnpm prisma:deploy
 
 说明：
 
-- `bash ../scripts/system/start.sh` 会自动执行上述 schema 预处理。
+- 根目录 `bash scripts/system/start.sh` / `bash scripts/system/start.sh --dev-backend` 会自动执行上述 schema 预处理。
 - 直接运行 `pnpm start:all` / `pnpm start:dev:all` 时，仍需要先手动完成数据库迁移。
 
 ## Simulation 语义

@@ -17,6 +17,8 @@ export class BacktestAgentClientService {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly timeoutMs: number;
+  private readonly runTimeoutMs: number;
+  private readonly interpretTimeoutMs: number;
 
   constructor() {
     this.baseUrl = (
@@ -30,6 +32,14 @@ export class BacktestAgentClientService {
       ?? '',
     ).trim();
     this.timeoutMs = Math.max(2000, Number(process.env.BACKTEST_AGENT_TIMEOUT_MS ?? '30000'));
+    this.runTimeoutMs = Math.max(
+      2000,
+      Number(process.env.BACKTEST_AGENT_RUN_TIMEOUT_MS ?? process.env.BACKTEST_AGENT_TIMEOUT_MS ?? '120000'),
+    );
+    this.interpretTimeoutMs = Math.max(
+      2000,
+      Number(process.env.BACKTEST_AGENT_INTERPRET_TIMEOUT_MS ?? process.env.BACKTEST_AGENT_TIMEOUT_MS ?? '60000'),
+    );
   }
 
   private sanitizeMessage(input: unknown, fallback: string): string {
@@ -44,9 +54,9 @@ export class BacktestAgentClientService {
     return status === 408 || status === 425 || status === 429;
   }
 
-  private async post(path: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async post(path: string, payload: Record<string, unknown>, timeoutMs = this.timeoutMs): Promise<Record<string, unknown>> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
@@ -111,7 +121,7 @@ export class BacktestAgentClientService {
       const name = String((error as Error | undefined)?.name ?? '');
       if (name === 'AbortError') {
         throw new AgentClientError(
-          `Backtest agent request timeout after ${this.timeoutMs}ms`,
+          `Backtest agent request timeout after ${timeoutMs}ms`,
           'agent_timeout',
           { retryable: true },
         );
@@ -147,11 +157,15 @@ export class BacktestAgentClientService {
     return await this.post('/internal/v1/backtest/compare', payload);
   }
 
+  async interpret(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return await this.post('/internal/v1/backtest/interpret', payload, this.interpretTimeoutMs);
+  }
+
   async strategyRun(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return await this.post('/internal/v1/backtest/strategy/run', payload);
+    return await this.post('/internal/v1/backtest/strategy/run', payload, this.runTimeoutMs);
   }
 
   async agentRun(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return await this.post('/internal/v1/backtest/agent/run', payload);
+    return await this.post('/internal/v1/backtest/agent/run', payload, this.runTimeoutMs);
   }
 }

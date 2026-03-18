@@ -268,11 +268,12 @@ async function main(): Promise<void> {
       const settingsPayload = asRecord(settingsPut.json);
       const ai = asRecord(settingsPayload.ai);
       const hasToken = ai.hasToken === true;
-      const masked = String(ai.apiTokenMasked ?? '');
+      const readable = ai.apiTokenReadable === true;
+      const echoed = String(ai.apiToken ?? '') === 'e2e-personal-token';
       push(
-        'user-settings-token-masked',
-        hasToken && masked === '******' ? 'pass' : 'warn',
-        `hasToken=${String(hasToken)}, masked=${masked || '(empty)'}`,
+        'user-settings-token-echo',
+        hasToken && readable && echoed ? 'pass' : 'warn',
+        `hasToken=${String(hasToken)}, readable=${String(readable)}, echoed=${String(echoed)}`,
       );
     }
 

@@ -14,6 +14,7 @@ import {
 import { PrismaService } from '@/common/database/prisma.service';
 import { safeJsonParse, safeJsonStringify } from '@/common/utils/json';
 import { AnalysisService } from '@/modules/analysis/analysis.service';
+import { BacktestAiInterpretationService } from './backtest-ai-interpretation.service';
 
 type RequesterScope = { userId: number; includeAll: boolean };
 
@@ -188,6 +189,7 @@ export class AgentBacktestService {
     private readonly backtestAgentClient: BacktestAgentClientService,
     private readonly analysisService: AnalysisService,
     private readonly aiRuntimeService: AiRuntimeService = {} as AiRuntimeService,
+    private readonly backtestAiInterpretationService: BacktestAiInterpretationService,
   ) {}
 
   // Agent 回放回测依赖一组独立的持久化表，启动前先显式校验，避免中途跑到一半才发现表缺失。
@@ -1027,6 +1029,11 @@ export class AgentBacktestService {
     };
   }
 
+  private hasAiInterpretation(value: unknown): boolean {
+    const status = String(asRecord(asRecord(value).ai_interpretation).status ?? '').trim();
+    return status === 'ready' || status === 'failed' || status === 'unavailable';
+  }
+
   private async loadGroupRow(input: {
     runGroupId: number;
     requester: RequesterScope;
@@ -1304,6 +1311,14 @@ export class AgentBacktestService {
       return insertedId;
     });
 
+    if (!shouldRefine) {
+      try {
+        await this.backtestAiInterpretationService.ensureAgentRunGroupInterpretation(runGroupId);
+      } catch (error: unknown) {
+        this.logger.warn(`Failed to generate agent AI interpretation runGroupId=${runGroupId}: ${(error as Error)?.message ?? error}`);
+      }
+    }
+
     const detail = await this.getAgentRunDetail({
       runGroupId,
       requester: input.requester,
@@ -1410,9 +1425,18 @@ export class AgentBacktestService {
   }): Promise<Record<string, unknown> | null> {
     await this.assertStorageReady();
 
-    const row = await this.loadGroupRow(input);
+    let row = await this.loadGroupRow(input);
     if (!row) {
       return null;
+    }
+
+    if (row.status === 'completed' && row.phase === 'done' && !this.hasAiInterpretation(row.summary_json)) {
+      try {
+        await this.backtestAiInterpretationService.ensureAgentRunGroupInterpretation(row.id);
+        row = await this.loadGroupRow(input) ?? row;
+      } catch (error: unknown) {
+        this.logger.warn(`Failed to lazy-hydrate agent AI interpretation runGroupId=${row.id}: ${(error as Error)?.message ?? error}`);
+      }
     }
 
     const base = this.mapGroupRow(row);
@@ -1552,6 +1576,11 @@ export class AgentBacktestService {
           errorMessage: null,
         });
       });
+      try {
+        await this.backtestAiInterpretationService.ensureAgentRunGroupInterpretation(row.id);
+      } catch (error: unknown) {
+        this.logger.warn(`Failed to generate refine AI interpretation runGroupId=${row.id}: ${(error as Error)?.message ?? error}`);
+      }
       return true;
     } catch (error: unknown) {
       const message = truncateText((error as Error)?.message ?? error, 500);

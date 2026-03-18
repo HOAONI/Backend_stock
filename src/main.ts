@@ -16,6 +16,7 @@ import { STRATEGY_BACKTEST_SCHEMA_NOT_READY_MESSAGE, getBacktestStorageReadiness
 import { GlobalHttpExceptionFilter } from './common/errors/http-exception.filter';
 import { getPersonalSecretStatus } from './common/security/personal-crypto.service';
 import { AgentBacktestWorkerService } from './common/worker/agent-backtest-worker.service';
+import { StrategyBacktestAiWorkerService } from './common/worker/strategy-backtest-ai-worker.service';
 import { TaskWorkerService } from './common/worker/task-worker.service';
 
 // 允许脚本或不同启动器通过 ENV_FILE 覆盖默认 .env，避免在入口之外复制环境加载逻辑。
@@ -118,6 +119,7 @@ async function bootstrap(): Promise<void> {
     // 嵌入式 worker 只用于本地开发或单进程部署，避免默认情况下 API/Worker 相互重复消费任务。
     workerServices.push(app.get(TaskWorkerService));
     workerServices.push(app.get(AgentBacktestWorkerService));
+    workerServices.push(app.get(StrategyBacktestAiWorkerService));
     workerServices.forEach((embeddedWorker) => {
       void embeddedWorker.start().catch((error: unknown) => {
         const logger = new Logger('EmbeddedWorker');

@@ -9,12 +9,13 @@ import { BacktestModule } from '@/modules/backtest/backtest.module';
 import { TradingAccountModule } from '@/modules/trading-account/trading-account.module';
 
 import { AgentBacktestWorkerService } from './agent-backtest-worker.service';
+import { StrategyBacktestAiWorkerService } from './strategy-backtest-ai-worker.service';
 import { TaskWorkerService } from './task-worker.service';
 
 @Module({
   imports: [PrismaModule, AgentClientModule, AnalysisModule, TradingAccountModule, BacktestModule],
-  providers: [TaskWorkerService, AgentBacktestWorkerService],
-  exports: [TaskWorkerService, AgentBacktestWorkerService],
+  providers: [TaskWorkerService, AgentBacktestWorkerService, StrategyBacktestAiWorkerService],
+  exports: [TaskWorkerService, AgentBacktestWorkerService, StrategyBacktestAiWorkerService],
 })
 /** 负责把该领域需要的控制器、服务与依赖声明组装到同一个 Nest 模块里。 */
 export class WorkerModule {}

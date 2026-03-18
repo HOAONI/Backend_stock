@@ -26,6 +26,7 @@ import {
 import { UserBacktestStrategyService } from './user-backtest-strategy.service';
 
 export const OVERALL_SENTINEL_CODE = '__overall__';
+type StrategyAiInterpretationJobStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -351,6 +352,21 @@ export class BacktestService {
       return null;
     }
     return value.toISOString().slice(0, 10);
+  }
+
+  private toIsoDateTime(value: Date | null | undefined): string | null {
+    if (!value || Number.isNaN(value.getTime())) {
+      return null;
+    }
+    return value.toISOString();
+  }
+
+  private normalizeStrategyAiInterpretationStatus(value: unknown): StrategyAiInterpretationJobStatus {
+    const text = String(value ?? '').trim();
+    if (text === 'processing' || text === 'completed' || text === 'failed') {
+      return text;
+    }
+    return 'pending';
   }
 
   private summaryRowsPayload(
@@ -1313,6 +1329,9 @@ export class BacktestService {
       run_group_id: row.id,
       code: row.code,
       engine_version: row.engineVersion,
+      ai_interpretation_status: this.normalizeStrategyAiInterpretationStatus(row.aiInterpretationStatus),
+      ai_interpretation_error_message: row.aiInterpretationErrorMessage ?? null,
+      ai_interpretation_completed_at: this.toIsoDateTime(row.aiInterpretationCompletedAt),
       requested_range: {
         start_date: this.toIsoDay(row.startDate),
         end_date: this.toIsoDay(row.endDate),
@@ -1426,6 +1445,13 @@ export class BacktestService {
           effectiveStartDate: this.parseDayText(effectiveRange.start_date),
           effectiveEndDate: this.parseDayText(effectiveRange.end_date),
           engineVersion,
+          aiInterpretationStatus: 'pending',
+          aiInterpretationAttempts: 0,
+          aiInterpretationRequestedAt: new Date(),
+          aiInterpretationStartedAt: null,
+          aiInterpretationCompletedAt: null,
+          aiInterpretationNextRetryAt: null,
+          aiInterpretationErrorMessage: null,
         },
       });
 
@@ -1562,6 +1588,9 @@ export class BacktestService {
         run_group_id: row.id,
         code: row.code,
         engine_version: row.engineVersion,
+        ai_interpretation_status: this.normalizeStrategyAiInterpretationStatus(row.aiInterpretationStatus),
+        ai_interpretation_error_message: row.aiInterpretationErrorMessage ?? null,
+        ai_interpretation_completed_at: this.toIsoDateTime(row.aiInterpretationCompletedAt),
         requested_range: {
           start_date: this.toIsoDay(row.startDate),
           end_date: this.toIsoDay(row.endDate),

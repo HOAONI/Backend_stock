@@ -2,6 +2,12 @@
 
 import { AgentBacktestService } from '../src/modules/backtest/agent-backtest.service';
 
+function createAgentInterpretationServiceMock() {
+  return {
+    ensureAgentRunGroupInterpretation: jest.fn(async () => {}),
+  };
+}
+
 // 统一伪造一条 run_group 行，便于分别覆盖 fast/refine/失败等不同阶段的行为。
 function createRunGroupRow(overrides?: Record<string, unknown>) {
   return {
@@ -86,7 +92,13 @@ function createResolvedRuntime(overrides?: Record<string, unknown>) {
 
 describe('AgentBacktestService', () => {
   it('exposes llm_meta on run detail and preserves SiliconFlow provider label', async () => {
-    const service = new AgentBacktestService({} as any, {} as any, {} as any, {} as any);
+    const service = new AgentBacktestService(
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      createAgentInterpretationServiceMock() as any,
+    );
     jest.spyOn(service as any, 'assertStorageReady').mockResolvedValue(undefined);
     jest.spyOn(service as any, 'loadGroupRow').mockResolvedValue(createRunGroupRow());
     jest.spyOn(service as any, 'loadDailySteps').mockResolvedValue([]);
@@ -113,6 +125,15 @@ describe('AgentBacktestService', () => {
     const row = createRunGroupRow({
       status: 'completed',
       phase: 'done',
+      summary_json: {
+        total_return_pct: 12.5,
+        ai_interpretation: {
+          version: 'v1',
+          status: 'ready',
+          verdict: '表现中等',
+          summary: '该回放在样本区间内整体表现中等。',
+        },
+      },
       completed_at: '2026-03-14T10:45:14.000Z',
     });
     const prisma = {
@@ -121,7 +142,13 @@ describe('AgentBacktestService', () => {
         .mockResolvedValueOnce([{ count: 1n }])
         .mockResolvedValueOnce([row]),
     };
-    const service = new AgentBacktestService(prisma as any, {} as any, {} as any, {} as any);
+    const service = new AgentBacktestService(
+      prisma as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      createAgentInterpretationServiceMock() as any,
+    );
     jest.spyOn(service as any, 'assertStorageReady').mockResolvedValue(undefined);
 
     const response = await service.listAgentRuns({
@@ -141,8 +168,63 @@ describe('AgentBacktestService', () => {
             base_url: 'https://api.siliconflow.cn/v1',
             model: 'Pro/deepseek-ai/DeepSeek-V3.2',
           },
+          summary: {
+            ai_interpretation: {
+              status: 'ready',
+            },
+          },
         },
       ],
+    });
+  });
+
+  it('lazy-hydrates missing ai_interpretation for completed detail views', async () => {
+    const rowWithoutInterpretation = createRunGroupRow({
+      status: 'completed',
+      phase: 'done',
+      summary_json: {
+        total_return_pct: 12.5,
+      },
+      completed_at: '2026-03-14T10:45:14.000Z',
+    });
+    const rowWithInterpretation = createRunGroupRow({
+      status: 'completed',
+      phase: 'done',
+      summary_json: {
+        total_return_pct: 12.5,
+        ai_interpretation: {
+          version: 'v1',
+          status: 'ready',
+          verdict: '表现中等',
+          summary: '该回放在样本区间内整体表现中等。',
+        },
+      },
+      completed_at: '2026-03-14T10:45:14.000Z',
+    });
+    const interpretationService = {
+      ensureAgentRunGroupInterpretation: jest.fn(async () => {}),
+    };
+    const service = new AgentBacktestService({} as any, {} as any, {} as any, {} as any, interpretationService as any);
+    jest.spyOn(service as any, 'assertStorageReady').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'loadGroupRow')
+      .mockResolvedValueOnce(rowWithoutInterpretation)
+      .mockResolvedValueOnce(rowWithInterpretation);
+    jest.spyOn(service as any, 'loadDailySteps').mockResolvedValue([]);
+    jest.spyOn(service as any, 'loadTrades').mockResolvedValue([]);
+    jest.spyOn(service as any, 'loadEquity').mockResolvedValue([]);
+
+    const detail = await service.getAgentRunDetail({
+      runGroupId: 11,
+      requester: { userId: 7, includeAll: false },
+    });
+
+    expect(interpretationService.ensureAgentRunGroupInterpretation).toHaveBeenCalledWith(11);
+    expect(detail).toMatchObject({
+      summary: {
+        ai_interpretation: {
+          status: 'ready',
+        },
+      },
     });
   });
 
@@ -178,7 +260,13 @@ describe('AgentBacktestService', () => {
         });
       }),
     };
-    const service = new AgentBacktestService(prisma as any, {} as any, {} as any, aiRuntimeService as any);
+    const service = new AgentBacktestService(
+      prisma as any,
+      {} as any,
+      {} as any,
+      aiRuntimeService as any,
+      createAgentInterpretationServiceMock() as any,
+    );
 
     const payload = await (service as any).resolveRefineRuntimeLlmPayload(7, 'system');
 
@@ -240,7 +328,13 @@ describe('AgentBacktestService', () => {
         forwardRuntimeLlm: false,
       })),
     };
-    const service = new AgentBacktestService(prisma as any, backtestAgentClient as any, {} as any, aiRuntimeService as any);
+    const service = new AgentBacktestService(
+      prisma as any,
+      backtestAgentClient as any,
+      {} as any,
+      aiRuntimeService as any,
+      createAgentInterpretationServiceMock() as any,
+    );
     jest.spyOn(service as any, 'isStorageReady').mockResolvedValue(true);
     jest.spyOn(service as any, 'loadGroupRow').mockResolvedValue(row);
     jest.spyOn(service as any, 'loadArchivedNews').mockResolvedValue({});
@@ -281,7 +375,13 @@ describe('AgentBacktestService', () => {
     const aiRuntimeService = {
       resolveEffectiveLlmFromProfile: jest.fn(async () => createResolvedRuntime()),
     };
-    const service = new AgentBacktestService(prisma as any, backtestAgentClient as any, {} as any, aiRuntimeService as any);
+    const service = new AgentBacktestService(
+      prisma as any,
+      backtestAgentClient as any,
+      {} as any,
+      aiRuntimeService as any,
+      createAgentInterpretationServiceMock() as any,
+    );
     jest.spyOn(service as any, 'isStorageReady').mockResolvedValue(true);
     jest.spyOn(service as any, 'loadGroupRow').mockResolvedValue(row);
     jest.spyOn(service as any, 'loadArchivedNews').mockResolvedValue({});

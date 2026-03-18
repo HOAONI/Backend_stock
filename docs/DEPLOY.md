@@ -57,13 +57,26 @@ pnpm exec prisma migrate resolve --applied 20260305074500_baseline
 
 ## 3. 构建与启动
 
-开发模式（推荐，API+Worker 同进程）：
+仅运行 Backend 开发模式（API+Worker 同进程）：
 
 ```bash
 pnpm start:dev:all
 ```
 
-生产模式：
+整套系统启动（请在仓库根目录执行）：
+
+```bash
+bash scripts/system/start.sh
+bash scripts/system/start.sh --dev-backend
+```
+
+停止整套系统：
+
+```bash
+bash scripts/system/stop.sh
+```
+
+生产模式（仅 Backend）：
 
 ```bash
 pnpm build
@@ -73,8 +86,9 @@ pnpm start:worker
 
 说明：
 
-- 根目录 `bash scripts/system/start.sh` 会在启动前按现有 `DATABASE_URL` 自动执行 schema 预处理，并兼容历史 `db push` 或未完成 migration 的本地库。
+- 根目录 `bash scripts/system/start.sh` / `bash scripts/system/start.sh --dev-backend` 会在启动前按现有 `DATABASE_URL` 自动执行 schema 预处理，兼容历史 `db push` 或未完成 migration 的本地库。
 - 直接运行 `pnpm start:all` / `pnpm start:dev:all` / `pnpm start:api` 时，仍需先手动完成 `pnpm prisma:deploy` 或 `pnpm db:push`。
+- `start:*` 是 `Backend_stock` 进程级入口，根目录 `scripts/system/*.sh` 是整套系统入口。
 
 ## 4. 健康检查
 
