@@ -23,6 +23,8 @@ export interface ConfigFieldSchema {
   is_sensitive: boolean;
   is_required: boolean;
   is_editable: boolean;
+  visible_in_strategy_page: boolean;
+  edit_lock_reason?: string;
   default_value?: string;
   options: string[];
   validation: Record<string, unknown>;

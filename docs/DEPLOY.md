@@ -68,6 +68,9 @@ pnpm start:dev:all
 ```bash
 bash scripts/system/start.sh
 bash scripts/system/start.sh --dev-backend
+# 首次建库 / 历史库补齐时再显式 prepare
+bash scripts/system/start.sh --prepare-db
+bash scripts/system/start.sh --dev-backend --prepare-db
 ```
 
 停止整套系统：
@@ -86,7 +89,9 @@ pnpm start:worker
 
 说明：
 
-- 根目录 `bash scripts/system/start.sh` / `bash scripts/system/start.sh --dev-backend` 会在启动前按现有 `DATABASE_URL` 自动执行 schema 预处理，兼容历史 `db push` 或未完成 migration 的本地库。
+- 根目录 `bash scripts/system/start.sh` / `bash scripts/system/start.sh --dev-backend` 默认只做只读 schema 检查，日志写入 `/tmp/stocksim/logs/backend-db-check.log`。
+- 只有显式传入 `--prepare-db` 时，才会执行重型 schema prepare，日志写入 `/tmp/stocksim/logs/backend-db-prepare.log`。
+- 如果默认检查提示 migration history 未收尾但结构已经齐全，先进入 `Backend_stock` 执行一次 `pnpm db:repair:migration-history`。
 - 直接运行 `pnpm start:all` / `pnpm start:dev:all` / `pnpm start:api` 时，仍需先手动完成 `pnpm prisma:deploy` 或 `pnpm db:push`。
 - `start:*` 是 `Backend_stock` 进程级入口，根目录 `scripts/system/*.sh` 是整套系统入口。
 

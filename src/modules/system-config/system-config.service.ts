@@ -18,6 +18,7 @@ import {
   ConfigUiControl,
   ConfigValidationIssue,
 } from './system-config.types';
+import { getSystemConfigFieldPolicy } from './system-config.policy';
 
 function inferCategory(key: string): ConfigCategory {
   if (key.includes('GEMINI') || key.includes('OPENAI') || key.includes('ANTHROPIC')) return 'ai_model';
@@ -150,15 +151,23 @@ export class SystemConfigService {
     isSensitive: boolean;
     displayOrder: number;
   }): ConfigFieldSchema {
+    const category = (item.category as ConfigCategory) || 'uncategorized';
+    const policy = getSystemConfigFieldPolicy({
+      key: item.key,
+      category,
+    });
+
     return {
       key: item.key,
       title: item.key,
-      category: (item.category as ConfigCategory) || 'uncategorized',
+      category,
       data_type: (item.dataType as ConfigDataType) || 'string',
       ui_control: (item.uiControl as ConfigUiControl) || 'text',
       is_sensitive: item.isSensitive,
       is_required: false,
-      is_editable: true,
+      is_editable: policy.is_editable,
+      visible_in_strategy_page: policy.visible_in_strategy_page,
+      edit_lock_reason: policy.edit_lock_reason,
       options: [],
       validation: this.buildValidation(item.dataType as ConfigDataType),
       display_order: item.displayOrder,
@@ -250,7 +259,21 @@ export class SystemConfigService {
     for (const item of items) {
       const key = String(item.key ?? '').trim().toUpperCase();
       const value = String(item.value ?? '');
+      const category = inferCategory(key);
       const dataType = inferDataType(key, value);
+      const policy = getSystemConfigFieldPolicy({ key, category });
+
+      if (!policy.is_editable) {
+        issues.push({
+          key,
+          code: 'readonly_key',
+          message: policy.edit_lock_reason ?? 'This configuration key is read-only',
+          severity: 'error',
+          expected: 'read-only',
+          actual: 'write requested',
+        });
+        continue;
+      }
 
       if (value.includes('\n')) {
         issues.push({

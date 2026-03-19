@@ -1,6 +1,7 @@
 /** 历史记录模块的服务层实现，负责汇总数据访问、业务规则和外部依赖编排。 */
 
 import { Injectable } from '@nestjs/common';
+import { AnalysisTaskStatus, Prisma } from '@prisma/client';
 
 import { PrismaService } from '@/common/database/prisma.service';
 import { safeJsonParse } from '@/common/utils/json';
@@ -12,6 +13,18 @@ function sentimentLabel(score: number): string {
   if (score >= 40) return '中性';
   if (score >= 20) return '悲观';
   return '极度悲观';
+}
+
+type HistoryListStatus = 'all' | 'completed' | 'failed';
+
+interface HistoryListInput {
+  stockCode?: string;
+  startDate?: string;
+  endDate?: string;
+  status: HistoryListStatus;
+  page: number;
+  limit: number;
+  scope: RequesterScope;
 }
 
 /** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
@@ -26,53 +39,190 @@ export class HistoryService {
     return { ownerUserId: scope.userId };
   }
 
-  async list(input: {
-    stockCode?: string;
-    startDate?: string;
-    endDate?: string;
-    page: number;
-    limit: number;
-    scope: RequesterScope;
-  }): Promise<{ total: number; items: Array<Record<string, unknown>> }> {
-    const where: Record<string, unknown> = {
+  private buildDateRange(
+    startDate?: string,
+    endDate?: string,
+  ): { completedAt: Prisma.DateTimeNullableFilter; createdAt: Prisma.DateTimeFilter } | null {
+    if (!startDate && !endDate) {
+      return null;
+    }
+
+    const completedAt: Prisma.DateTimeNullableFilter = {};
+    const createdAt: Prisma.DateTimeFilter = {};
+
+    if (startDate) {
+      const start = new Date(`${startDate}T00:00:00`);
+      completedAt.gte = start;
+      createdAt.gte = start;
+    }
+
+    if (endDate) {
+      const end = new Date(`${endDate}T00:00:00`);
+      end.setDate(end.getDate() + 1);
+      completedAt.lt = end;
+      createdAt.lt = end;
+    }
+
+    return { completedAt, createdAt };
+  }
+
+  private buildCompletedWhere(input: Pick<HistoryListInput, 'stockCode' | 'startDate' | 'endDate' | 'scope'>): Prisma.AnalysisHistoryWhereInput {
+    const where: Prisma.AnalysisHistoryWhereInput = {
       ...this.buildOwnerFilter(input.scope),
     };
+
     if (input.stockCode) {
       where.code = input.stockCode;
     }
 
-    if (input.startDate || input.endDate) {
-      const createdAt: Record<string, Date> = {};
-      if (input.startDate) {
-        createdAt.gte = new Date(`${input.startDate}T00:00:00`);
-      }
-      if (input.endDate) {
-        const end = new Date(`${input.endDate}T00:00:00`);
-        end.setDate(end.getDate() + 1);
-        createdAt.lt = end;
-      }
-      where.createdAt = createdAt;
+    const range = this.buildDateRange(input.startDate, input.endDate);
+    if (range) {
+      where.createdAt = range.createdAt;
     }
 
-    const total = await this.prisma.analysisHistory.count({ where });
-    const rows = await this.prisma.analysisHistory.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-      skip: (input.page - 1) * input.limit,
-      take: input.limit,
-    });
+    return where;
+  }
 
-    const items = rows.map((row) => ({
+  private buildFailedWhere(input: Pick<HistoryListInput, 'stockCode' | 'startDate' | 'endDate' | 'scope'>): Prisma.AnalysisTaskWhereInput {
+    const where: Prisma.AnalysisTaskWhereInput = {
+      ...this.buildOwnerFilter(input.scope),
+      status: AnalysisTaskStatus.failed,
+    };
+
+    if (input.stockCode) {
+      where.stockCode = input.stockCode;
+    }
+
+    const range = this.buildDateRange(input.startDate, input.endDate);
+    if (range) {
+      where.OR = [
+        { completedAt: range.completedAt },
+        {
+          AND: [
+            { completedAt: null },
+            { createdAt: range.createdAt },
+          ],
+        },
+      ];
+    }
+
+    return where;
+  }
+
+  private mapCompletedHistoryItem(row: {
+    queryId: string | null;
+    code: string;
+    name: string | null;
+    reportType: string | null;
+    sentimentScore: number | null;
+    operationAdvice: string | null;
+    createdAt: Date;
+  }): Record<string, unknown> {
+    return {
       query_id: row.queryId ?? '',
+      task_id: row.queryId ?? null,
       stock_code: row.code,
       stock_name: row.name,
       report_type: row.reportType,
       sentiment_score: row.sentimentScore,
       operation_advice: row.operationAdvice,
+      status: 'completed',
+      error_message: null,
       created_at: row.createdAt.toISOString(),
-    }));
+    };
+  }
 
-    return { total, items };
+  private mapFailedHistoryItem(row: {
+    taskId: string;
+    stockCode: string;
+    reportType: string;
+    message: string | null;
+    error: string | null;
+    createdAt: Date;
+    completedAt: Date | null;
+  }): Record<string, unknown> {
+    return {
+      query_id: row.taskId,
+      task_id: row.taskId,
+      stock_code: row.stockCode,
+      stock_name: null,
+      report_type: row.reportType,
+      sentiment_score: null,
+      operation_advice: null,
+      status: 'failed',
+      error_message: row.error ?? row.message ?? '分析失败（无详细错误）',
+      created_at: (row.completedAt ?? row.createdAt).toISOString(),
+    };
+  }
+
+  async list(input: HistoryListInput): Promise<{ total: number; items: Array<Record<string, unknown>> }> {
+    const normalizedStatus: HistoryListStatus = input.status === 'all' || input.status === 'failed'
+      ? input.status
+      : 'completed';
+
+    const completedWhere = this.buildCompletedWhere(input);
+    const failedWhere = this.buildFailedWhere(input);
+
+    if (normalizedStatus === 'completed') {
+      const total = await this.prisma.analysisHistory.count({ where: completedWhere });
+      const rows = await this.prisma.analysisHistory.findMany({
+        where: completedWhere,
+        orderBy: { createdAt: 'desc' },
+        skip: (input.page - 1) * input.limit,
+        take: input.limit,
+      });
+
+      return {
+        total,
+        items: rows.map(row => this.mapCompletedHistoryItem(row)),
+      };
+    }
+
+    if (normalizedStatus === 'failed') {
+      const total = await this.prisma.analysisTask.count({ where: failedWhere });
+      const rows = await this.prisma.analysisTask.findMany({
+        where: failedWhere,
+        orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }],
+        skip: (input.page - 1) * input.limit,
+        take: input.limit,
+      });
+
+      return {
+        total,
+        items: rows.map(row => this.mapFailedHistoryItem(row)),
+      };
+    }
+
+    const mergeWindow = input.page * input.limit;
+    const [completedTotal, completedRows, failedTotal, failedRows] = await Promise.all([
+      this.prisma.analysisHistory.count({ where: completedWhere }),
+      this.prisma.analysisHistory.findMany({
+        where: completedWhere,
+        orderBy: { createdAt: 'desc' },
+        take: mergeWindow,
+      }),
+      this.prisma.analysisTask.count({ where: failedWhere }),
+      this.prisma.analysisTask.findMany({
+        where: failedWhere,
+        orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }],
+        take: mergeWindow,
+      }),
+    ]);
+
+    const mergedItems = [
+      ...completedRows.map(row => this.mapCompletedHistoryItem(row)),
+      ...failedRows.map(row => this.mapFailedHistoryItem(row)),
+    ].sort((left, right) => {
+      const leftTime = new Date(String(left.created_at ?? '')).getTime();
+      const rightTime = new Date(String(right.created_at ?? '')).getTime();
+      return rightTime - leftTime;
+    });
+
+    const offset = (input.page - 1) * input.limit;
+    return {
+      total: completedTotal + failedTotal,
+      items: mergedItems.slice(offset, offset + input.limit),
+    };
   }
 
   async detail(queryId: string, scope: RequesterScope): Promise<Record<string, unknown> | null> {

@@ -7,6 +7,7 @@ Prisma schema migrations are versioned under `prisma/migrations/`.
 - Baseline migration id: `20260305074500_baseline`
 - Fresh DB deploy: `pnpm prisma:deploy`
 - Existing DB already created by `db push`: run `pnpm exec prisma migrate resolve --applied 20260305074500_baseline` once
+- Existing local DB whose schema is aligned but `_prisma_migrations` still contains the failed `20260307193000_scheduler_center`: run `pnpm db:repair:migration-history` once
 
 Core migrated tables:
 

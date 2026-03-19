@@ -11,6 +11,14 @@ import { HistoryService } from './history.service';
 export class HistoryController {
   constructor(private readonly historyService: HistoryService) {}
 
+  private normalizeListStatus(value: string | undefined): 'all' | 'completed' | 'failed' {
+    const raw = String(value ?? '').trim().toLowerCase();
+    if (raw === 'all' || raw === 'failed') {
+      return raw;
+    }
+    return 'completed';
+  }
+
   private resolveScope(req: Request): { userId: number; includeAll: boolean } {
     const user = req.authUser;
     if (!user) {
@@ -29,6 +37,7 @@ export class HistoryController {
     @Query('stock_code') stockCode?: string,
     @Query('start_date') startDate?: string,
     @Query('end_date') endDate?: string,
+    @Query('status') status?: string,
     @Query('page') page = '1',
     @Query('limit') limit = '20',
   ): Promise<Record<string, unknown>> {
@@ -43,6 +52,7 @@ export class HistoryController {
       stockCode,
       startDate,
       endDate,
+      status: this.normalizeListStatus(status),
       page: safePage,
       limit: safeLimit,
       scope,

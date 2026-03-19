@@ -33,9 +33,18 @@ cd ..
 bash scripts/system/start.sh
 # 或使用 backend 开发模式（支持热更新）
 bash scripts/system/start.sh --dev-backend
+# 首次建库 / 历史库补齐时，显式执行重型 schema prepare
+bash scripts/system/start.sh --prepare-db
+bash scripts/system/start.sh --dev-backend --prepare-db
 ```
 
-根目录系统脚本会先按当前 `Backend_stock/.env` 中的 `DATABASE_URL` 自动补齐 schema，再启动三服务；不会复用 `db:init`，也不会改写现有连接串。若本地库存在历史 `db push` 痕迹或未完成的 Prisma migration，脚本会自动切到兼容的 schema 同步方式。成功时控制台保持简洁输出，详细数据库预处理日志写入 `/tmp/stocksim/logs/backend-db-prepare.log`。
+根目录系统脚本默认只会按当前 `Backend_stock/.env` 中的 `DATABASE_URL` 做一次只读 schema 检查，再启动三服务；不会复用 `db:init`，也不会改写现有连接串。默认检查日志写入 `/tmp/stocksim/logs/backend-db-check.log`。只有显式传入 `--prepare-db` 时，才会执行重型 schema prepare，并把详细日志写入 `/tmp/stocksim/logs/backend-db-prepare.log`。
+
+如果默认检查提示 “Prisma migration 历史未收尾，但对应 schema 结构已经存在”，先在 `Backend_stock` 目录执行一次：
+
+```bash
+pnpm db:repair:migration-history
+```
 
 停止整套系统：
 
@@ -162,7 +171,8 @@ pnpm prisma:deploy
 
 说明：
 
-- 根目录 `bash scripts/system/start.sh` / `bash scripts/system/start.sh --dev-backend` 会自动执行上述 schema 预处理。
+- 根目录 `bash scripts/system/start.sh` / `bash scripts/system/start.sh --dev-backend` 默认只执行只读 schema 检查。
+- 需要首次建库、补齐历史库或显式自愈时，使用 `bash scripts/system/start.sh --prepare-db`。
 - 直接运行 `pnpm start:all` / `pnpm start:dev:all` 时，仍需要先手动完成数据库迁移。
 
 ## Simulation 语义
