@@ -56,6 +56,9 @@ describe('Runtime config forwarding and auto-order guards', () => {
       ...override,
     })),
   });
+  const createSystemConfigService = () => ({
+    getCurrentMarketSource: jest.fn(async () => 'tencent'),
+  });
 
   const legacyExecutionMeta = {
     execution_mode: 'paper' as const,
@@ -132,6 +135,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
         agentRunBridge,
         aiRuntimeService as any,
         brokerAccountsService,
+        createSystemConfigService() as any,
         tradingAccountService,
       );
 
@@ -209,6 +213,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
         agentRunBridge,
         aiRuntimeService as any,
         brokerAccountsService,
+        createSystemConfigService() as any,
         tradingAccountService,
       );
 
@@ -267,6 +272,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
         agentRunBridge,
         aiRuntimeService as any,
         brokerAccountsService,
+        createSystemConfigService() as any,
         tradingAccountService,
       );
 
@@ -327,6 +333,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
         agentRunBridge,
         aiRuntimeService as any,
         brokerAccountsService,
+        createSystemConfigService() as any,
         tradingAccountService,
       );
 
@@ -409,6 +416,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
         agentRunBridge,
         aiRuntimeService as any,
         brokerAccountsService,
+        createSystemConfigService() as any,
         tradingAccountService,
       );
 
@@ -457,6 +465,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
       } as any;
 
       const service = new TaskWorkerService(
+        {} as any,
         {} as any,
         {} as any,
         {} as any,
@@ -518,6 +527,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
         {} as any,
         {} as any,
         {} as any,
+        {} as any,
         tradingAccountService,
       );
 
@@ -549,6 +559,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
 
     it('does not trigger legacy worker placement when Agent already owns broker execution', async () => {
       const service = new TaskWorkerService(
+        {} as any,
         {} as any,
         {} as any,
         {} as any,
@@ -588,6 +599,7 @@ describe('Runtime config forwarding and auto-order guards', () => {
 
     it('promotes upstream llm timeout code from agent task failures', async () => {
       const service = new TaskWorkerService(
+        {} as any,
         {} as any,
         {} as any,
         {} as any,

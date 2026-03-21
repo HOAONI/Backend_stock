@@ -14,6 +14,10 @@ export interface AgentRuntimeContext {
   positions?: Array<Record<string, unknown>>;
 }
 
+export interface AgentRuntimeDataSourceConfig {
+  market_source: string;
+}
+
 export interface AgentRuntimeConfig {
   account: {
     account_name: string;
@@ -33,6 +37,7 @@ export interface AgentRuntimeConfig {
     take_profit_pct: number;
   };
   execution?: AgentRuntimeExecutionConfig;
+  data_source?: AgentRuntimeDataSourceConfig;
   context?: AgentRuntimeContext;
 }
 

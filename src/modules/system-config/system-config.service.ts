@@ -20,6 +20,21 @@ import {
 } from './system-config.types';
 import { getSystemConfigFieldPolicy } from './system-config.policy';
 
+export const MARKET_DATA_SOURCE_KEY = 'MARKET_DATA_SOURCE';
+export const DEFAULT_MARKET_DATA_SOURCE = 'tencent';
+
+const BUILTIN_CONFIG_ITEMS = [
+  {
+    key: MARKET_DATA_SOURCE_KEY,
+    value: DEFAULT_MARKET_DATA_SOURCE,
+    category: 'data_source' as ConfigCategory,
+    dataType: 'string' as ConfigDataType,
+    uiControl: 'select' as ConfigUiControl,
+    isSensitive: false,
+    displayOrder: 1,
+  },
+] as const;
+
 function inferCategory(key: string): ConfigCategory {
   if (key.includes('GEMINI') || key.includes('OPENAI') || key.includes('ANTHROPIC')) return 'ai_model';
   if (key.includes('TAVILY') || key.includes('SERPAPI') || key.includes('BRAVE') || key.includes('TUSHARE')) return 'data_source';
@@ -70,10 +85,48 @@ function categoryMeta(category: ConfigCategory): { title: string; description: s
 export class SystemConfigService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async ensureBuiltinItems(): Promise<number> {
+    const existing = await this.prisma.systemConfigItem.findMany({
+      where: {
+        key: {
+          in: BUILTIN_CONFIG_ITEMS.map(item => item.key),
+        },
+      },
+      select: {
+        key: true,
+      },
+    });
+    const existingKeys = new Set(existing.map(item => item.key));
+    const missing = BUILTIN_CONFIG_ITEMS.filter(item => !existingKeys.has(item.key));
+    if (missing.length === 0) {
+      return 0;
+    }
+
+    await this.prisma.systemConfigItem.createMany({
+      data: missing.map(item => ({
+        key: item.key,
+        value: item.value,
+        category: item.category,
+        dataType: item.dataType,
+        uiControl: item.uiControl,
+        isSensitive: item.isSensitive,
+        displayOrder: item.displayOrder,
+      })),
+    });
+    return missing.length;
+  }
+
   // 首次进入配置中心时把当前 .env 快照导入数据库，后续所有配置编辑都以数据库为主。
   private async ensureSeeded(): Promise<void> {
     const count = await this.prisma.systemConfigItem.count();
+    let mutated = false;
     if (count > 0) {
+      mutated = await this.ensureBuiltinItems() > 0;
+      if (mutated) {
+        await this.prisma.systemConfigRevision.create({
+          data: { version: crypto.createHash('sha1').update(`${Date.now()}-${Math.random()}`).digest('hex') },
+        });
+      }
       return;
     }
 
@@ -96,11 +149,16 @@ export class SystemConfigService {
 
     if (rows.length > 0) {
       await this.prisma.systemConfigItem.createMany({ data: rows });
+      mutated = true;
     }
 
-    await this.prisma.systemConfigRevision.create({
-      data: { version: crypto.createHash('sha1').update(`${Date.now()}-${Math.random()}`).digest('hex') },
-    });
+    mutated = await this.ensureBuiltinItems() > 0 || mutated;
+
+    if (mutated) {
+      await this.prisma.systemConfigRevision.create({
+        data: { version: crypto.createHash('sha1').update(`${Date.now()}-${Math.random()}`).digest('hex') },
+      });
+    }
   }
 
   async getCurrentVersion(): Promise<string> {
@@ -140,6 +198,74 @@ export class SystemConfigService {
       acc[row.key] = row.value;
       return acc;
     }, {});
+  }
+
+  async getConfigItem(key: string): Promise<{ key: string; value: string; updatedAt: Date } | null> {
+    await this.ensureSeeded();
+    const normalizedKey = String(key ?? '').trim().toUpperCase();
+    if (!normalizedKey) {
+      return null;
+    }
+
+    const row = await this.prisma.systemConfigItem.findUnique({
+      where: { key: normalizedKey },
+      select: {
+        key: true,
+        value: true,
+        updatedAt: true,
+      },
+    });
+    return row ? { key: row.key, value: row.value, updatedAt: row.updatedAt } : null;
+  }
+
+  async getCurrentMarketSource(): Promise<string> {
+    const row = await this.getConfigItem(MARKET_DATA_SOURCE_KEY);
+    return String(row?.value ?? DEFAULT_MARKET_DATA_SOURCE).trim().toLowerCase() || DEFAULT_MARKET_DATA_SOURCE;
+  }
+
+  async getMarketSourceSetting(): Promise<{ key: string; value: string; updatedAt: Date | null }> {
+    const row = await this.getConfigItem(MARKET_DATA_SOURCE_KEY);
+    return {
+      key: MARKET_DATA_SOURCE_KEY,
+      value: String(row?.value ?? DEFAULT_MARKET_DATA_SOURCE).trim().toLowerCase() || DEFAULT_MARKET_DATA_SOURCE,
+      updatedAt: row?.updatedAt ?? null,
+    };
+  }
+
+  async updateMarketSource(source: string): Promise<{ source: string; updatedAt: Date; configVersion: string }> {
+    await this.ensureSeeded();
+    const normalizedSource = String(source ?? '').trim().toLowerCase() || DEFAULT_MARKET_DATA_SOURCE;
+    const row = await this.prisma.systemConfigItem.upsert({
+      where: { key: MARKET_DATA_SOURCE_KEY },
+      update: {
+        value: normalizedSource,
+        category: 'data_source',
+        dataType: 'string',
+        uiControl: 'select',
+        isSensitive: false,
+      },
+      create: {
+        key: MARKET_DATA_SOURCE_KEY,
+        value: normalizedSource,
+        category: 'data_source',
+        dataType: 'string',
+        uiControl: 'select',
+        isSensitive: false,
+        displayOrder: 1,
+      },
+      select: {
+        updatedAt: true,
+      },
+    });
+
+    const configVersion = uuidv4().replace(/-/g, '');
+    await this.prisma.systemConfigRevision.create({ data: { version: configVersion } });
+
+    return {
+      source: normalizedSource,
+      updatedAt: row.updatedAt,
+      configVersion,
+    };
   }
 
   private toFieldSchema(item: {

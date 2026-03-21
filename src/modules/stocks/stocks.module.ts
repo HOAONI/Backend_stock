@@ -3,11 +3,13 @@
 import { Module } from '@nestjs/common';
 
 import { ImageStockExtractorService } from '@/common/image/image-stock-extractor.service';
+import { SystemConfigModule } from '@/modules/system-config/system-config.module';
 
 import { StocksController } from './stocks.controller';
 import { StocksService } from './stocks.service';
 
 @Module({
+  imports: [SystemConfigModule],
   controllers: [StocksController],
   providers: [StocksService, ImageStockExtractorService],
   exports: [StocksService],

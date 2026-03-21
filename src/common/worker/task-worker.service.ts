@@ -10,6 +10,7 @@ import { PrismaService } from '@/common/database/prisma.service';
 import { mapAgentRunToAnalysis } from '@/modules/analysis/analysis.mapper';
 import { AnalysisSchedulerService } from '@/modules/analysis/analysis-scheduler.service';
 import { AnalysisBrokerMeta, AnalysisService } from '@/modules/analysis/analysis.service';
+import { SchedulerHeartbeatService } from '@/modules/analysis/scheduler-heartbeat.service';
 import { TradingAccountService, TradingRuntimeContextPayload } from '@/modules/trading-account/trading-account.service';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -100,6 +101,7 @@ export class TaskWorkerService {
     private readonly agentRunBridge: AgentRunBridgeService,
     private readonly analysisService: AnalysisService,
     private readonly analysisSchedulerService: AnalysisSchedulerService,
+    private readonly schedulerHeartbeatService: SchedulerHeartbeatService,
     private readonly tradingAccountService: TradingAccountService,
   ) {}
 
@@ -111,7 +113,7 @@ export class TaskWorkerService {
 
     while (this.running) {
       try {
-        const processed = await this.processOne();
+        const processed = await this.analysisSchedulerService.triggerNextDueSchedule() || await this.processOne();
         await this.reportHeartbeat();
         if (!processed) {
           await this.sleep(1500);
@@ -136,7 +138,7 @@ export class TaskWorkerService {
   // 心跳更新失败只记日志不抛错，避免调度观测链路反向拖垮真正的任务执行链路。
   private async reportHeartbeat(input?: { lastTaskId?: string | null; lastError?: string | null }): Promise<void> {
     try {
-      await this.analysisSchedulerService.updateWorkerHeartbeat({
+      await this.schedulerHeartbeatService.updateWorkerHeartbeat({
         workerName: this.workerName,
         workerMode: this.workerMode(),
         lastTaskId: input?.lastTaskId ?? null,
@@ -144,6 +146,30 @@ export class TaskWorkerService {
       });
     } catch (error: unknown) {
       this.logger.warn(`worker heartbeat update failed: ${(error as Error).message}`);
+    }
+  }
+
+  private async syncScheduleState(input: {
+    scheduleId?: string | null;
+    taskId: string;
+    status: 'processing' | 'completed' | 'failed' | 'cancelled';
+    message?: string | null;
+    completedAt?: Date | null;
+  }): Promise<void> {
+    if (!input.scheduleId) {
+      return;
+    }
+
+    try {
+      await this.analysisSchedulerService.recordScheduleTaskState({
+        scheduleId: input.scheduleId,
+        taskId: input.taskId,
+        status: input.status,
+        message: input.message ?? null,
+        completedAt: input.completedAt ?? null,
+      });
+    } catch (error: unknown) {
+      this.logger.warn(`schedule state sync failed: ${(error as Error).message}`);
     }
   }
 
@@ -633,6 +659,12 @@ export class TaskWorkerService {
     }
 
     await this.reportHeartbeat({ lastTaskId: candidate.taskId });
+    await this.syncScheduleState({
+      scheduleId: candidate.scheduleId,
+      taskId: candidate.taskId,
+      status: 'processing',
+      message: '正在分析中...',
+    });
     await this.handleTask(candidate.id);
     return true;
   }
@@ -695,17 +727,25 @@ export class TaskWorkerService {
         },
       });
 
+      const completedAt = new Date();
       await this.prisma.analysisTask.update({
         where: { id: task.id },
         data: {
           status: AnalysisTaskStatus.completed,
           progress: 100,
           message: '分析完成',
-          completedAt: new Date(),
+          completedAt,
           resultQueryId: task.taskId,
           resultPayload: resultPayload as any,
           updatedAt: new Date(),
         },
+      });
+      await this.syncScheduleState({
+        scheduleId: task.scheduleId,
+        taskId: task.taskId,
+        status: 'completed',
+        message: '分析完成',
+        completedAt,
       });
       await this.reportHeartbeat({ lastTaskId: task.taskId });
     } catch (error: unknown) {
@@ -739,6 +779,7 @@ export class TaskWorkerService {
 
       this.logger.error(`Task failed: ${task.taskId} [${bridgeErrorCode}] ${safeMessage}`);
 
+      const completedAt = new Date();
       await this.prisma.analysisTask.update({
         where: { id: task.id },
         data: {
@@ -756,9 +797,16 @@ export class TaskWorkerService {
               message: safeMessage,
             },
           } as any,
-          completedAt: new Date(),
+          completedAt,
           updatedAt: new Date(),
         },
+      });
+      await this.syncScheduleState({
+        scheduleId: task.scheduleId,
+        taskId: task.taskId,
+        status: 'failed',
+        message: `[${bridgeErrorCode}] ${safeMessage}`.slice(0, 500),
+        completedAt,
       });
       await this.reportHeartbeat({ lastTaskId: task.taskId, lastError: safeMessage });
     }

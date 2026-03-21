@@ -675,108 +675,69 @@ function buildAnalysisEvent(ctx: AdminLogEventContext): AdminLogEventView {
     });
   }
 
-  if (ctx.normalizedPath === '/api/v1/analysis/scheduler/overview') {
-    return createEventView(ctx, {
-      eventType: 'scheduler_overview',
-      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '调度中心概览'),
-      moduleLabel: '调度中心',
-    });
-  }
-
-  if (ctx.normalizedPath === '/api/v1/analysis/scheduler/health') {
-    return createEventView(ctx, {
-      eventType: 'scheduler_health',
-      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '调度中心健康状态'),
-      moduleLabel: '调度中心',
-    });
-  }
-
-  if (ctx.normalizedPath === '/api/v1/analysis/scheduler/tasks') {
-    const statusLabel = labelStatus(getQueryString(ctx, 'status'));
+  if (ctx.normalizedPath === '/api/v1/analysis/scheduler/schedules') {
     const stockCode = getQueryString(ctx, 'stock_code', 'stockCode');
-    const username = getQueryString(ctx, 'username');
-    const targetLabel = formatList([
-      statusLabel ? `状态：${statusLabel}` : '',
-      stockCode ? `股票：${stockCode}` : '',
-      username ? `用户：${username}` : '',
-    ]) || null;
+    const targetLabel = stockCode ? `股票：${stockCode}` : null;
+
+    if (ctx.input.method === 'POST') {
+      const createdStockCode = getRecordString(ctx.body, 'stock_code', 'stockCode') ?? getNestedString(ctx.response, 'schedule', 'stock_code');
+      return createEventView(ctx, {
+        eventType: 'schedule_create',
+        eventSummary: buildSummary(
+          ctx.actorLabel,
+          ctx.input.success,
+          `创建了${createdStockCode ? `股票 ${createdStockCode} 的` : ''}定时任务`,
+          `创建${createdStockCode ? `股票 ${createdStockCode} 的` : ''}定时任务`,
+        ),
+        moduleLabel: '调度中心',
+        targetLabel: createdStockCode,
+      });
+    }
+
     return createEventView(ctx, {
-      eventType: 'scheduler_task_list',
-      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '调度任务列表'),
+      eventType: 'schedule_list',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, '定时任务列表'),
       moduleLabel: '调度中心',
       targetLabel,
     });
   }
 
-  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+\/retry$/.test(ctx.normalizedPath)) {
-    const taskId = extractAnalysisTaskId(ctx);
-    return createEventView(ctx, {
-      eventType: 'scheduler_task_retry',
-      eventSummary: buildSummary(
-        ctx.actorLabel,
-        ctx.input.success,
-        `重试了调度任务 ${taskId ?? '目标任务'}`,
-        `重试调度任务 ${taskId ?? '目标任务'}`,
-      ),
-      moduleLabel: '调度中心',
-      targetLabel: taskId,
-    });
-  }
+  if (/^\/api\/v1\/analysis\/scheduler\/schedules\/[^/]+$/.test(ctx.normalizedPath)) {
+    const scheduleId = getPathParamAfter(ctx.pathSegments, 'schedules');
 
-  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+\/rerun$/.test(ctx.normalizedPath)) {
-    const taskId = extractAnalysisTaskId(ctx);
-    return createEventView(ctx, {
-      eventType: 'scheduler_task_rerun',
-      eventSummary: buildSummary(
-        ctx.actorLabel,
-        ctx.input.success,
-        `重新运行了调度任务 ${taskId ?? '目标任务'}`,
-        `重新运行调度任务 ${taskId ?? '目标任务'}`,
-      ),
-      moduleLabel: '调度中心',
-      targetLabel: taskId,
-    });
-  }
+    if (ctx.input.method === 'PATCH') {
+      return createEventView(ctx, {
+        eventType: 'schedule_update',
+        eventSummary: buildSummary(
+          ctx.actorLabel,
+          ctx.input.success,
+          `更新了定时任务 ${scheduleId ?? '目标任务'}`,
+          `更新定时任务 ${scheduleId ?? '目标任务'}`,
+        ),
+        moduleLabel: '调度中心',
+        targetLabel: scheduleId,
+      });
+    }
 
-  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+\/cancel$/.test(ctx.normalizedPath)) {
-    const taskId = extractAnalysisTaskId(ctx);
-    return createEventView(ctx, {
-      eventType: 'scheduler_task_cancel',
-      eventSummary: buildSummary(
-        ctx.actorLabel,
-        ctx.input.success,
-        `取消了调度任务 ${taskId ?? '目标任务'}`,
-        `取消调度任务 ${taskId ?? '目标任务'}`,
-      ),
-      moduleLabel: '调度中心',
-      targetLabel: taskId,
-    });
-  }
+    if (ctx.input.method === 'DELETE') {
+      return createEventView(ctx, {
+        eventType: 'schedule_delete',
+        eventSummary: buildSummary(
+          ctx.actorLabel,
+          ctx.input.success,
+          `删除了定时任务 ${scheduleId ?? '目标任务'}`,
+          `删除定时任务 ${scheduleId ?? '目标任务'}`,
+        ),
+        moduleLabel: '调度中心',
+        targetLabel: scheduleId,
+      });
+    }
 
-  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+\/priority$/.test(ctx.normalizedPath)) {
-    const taskId = extractAnalysisTaskId(ctx);
-    const priority = getRecordNumber(ctx.body, 'priority');
-    const priorityLabel = priority != null ? `优先级 ${priority}` : '任务优先级';
     return createEventView(ctx, {
-      eventType: 'scheduler_task_priority',
-      eventSummary: buildSummary(
-        ctx.actorLabel,
-        ctx.input.success,
-        `调整了调度任务 ${taskId ?? '目标任务'} 的${priorityLabel}`,
-        `调整调度任务 ${taskId ?? '目标任务'} 的${priorityLabel}`,
-      ),
+      eventType: 'schedule_detail',
+      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `定时任务 ${scheduleId ?? '目标任务'} 详情`),
       moduleLabel: '调度中心',
-      targetLabel: taskId,
-    });
-  }
-
-  if (/^\/api\/v1\/analysis\/scheduler\/tasks\/[^/]+$/.test(ctx.normalizedPath)) {
-    const taskId = extractAnalysisTaskId(ctx);
-    return createEventView(ctx, {
-      eventType: 'scheduler_task_detail',
-      eventSummary: buildReadSummary(ctx.actorLabel, ctx.input.success, `调度任务 ${taskId ?? '目标任务'} 详情`),
-      moduleLabel: '调度中心',
-      targetLabel: taskId,
+      targetLabel: scheduleId,
     });
   }
 

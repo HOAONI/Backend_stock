@@ -444,57 +444,49 @@ describe('Admin log readable events', () => {
   });
 
   it('renders readable scheduler, auth, admin logs, and system config summaries', () => {
-    const retryEvent = buildAdminLogEventView(createInput({
+    const createEvent = buildAdminLogEventView(createInput({
       method: 'POST',
-      path: '/api/v1/analysis/scheduler/tasks/task-123/retry',
-      moduleCode: 'analysis',
-      action: 'write',
-    }));
-
-    expect(retryEvent).toMatchObject({
-      eventType: 'scheduler_task_retry',
-      eventSummary: 'surper1重试了调度任务 task-123',
-      moduleLabel: '调度中心',
-      targetLabel: 'task-123',
-    });
-    expectReadableSummary(retryEvent.eventSummary);
-
-    const rerunEvent = buildAdminLogEventView(createInput({
-      method: 'POST',
-      path: '/api/v1/analysis/scheduler/tasks/task-123/rerun',
-      moduleCode: 'analysis',
-      action: 'write',
-    }));
-
-    expect(rerunEvent.eventSummary).toBe('surper1重新运行了调度任务 task-123');
-    expectReadableSummary(rerunEvent.eventSummary);
-
-    const cancelEvent = buildAdminLogEventView(createInput({
-      method: 'POST',
-      path: '/api/v1/analysis/scheduler/tasks/task-123/cancel',
-      moduleCode: 'analysis',
-      action: 'write',
-    }));
-
-    expect(cancelEvent.eventSummary).toBe('surper1取消了调度任务 task-123');
-    expectReadableSummary(cancelEvent.eventSummary);
-
-    const priorityEvent = buildAdminLogEventView(createInput({
-      method: 'PATCH',
-      path: '/api/v1/analysis/scheduler/tasks/task-123/priority',
+      path: '/api/v1/analysis/scheduler/schedules',
       moduleCode: 'analysis',
       action: 'write',
       bodyMasked: {
-        priority: 3,
+        stock_code: '600519',
+        interval_minutes: 15,
+        execution_mode: 'auto',
       },
     }));
 
-    expect(priorityEvent).toMatchObject({
-      eventType: 'scheduler_task_priority',
-      eventSummary: 'surper1调整了调度任务 task-123 的优先级 3',
-      targetLabel: 'task-123',
+    expect(createEvent).toMatchObject({
+      eventType: 'schedule_create',
+      eventSummary: 'surper1创建了股票 600519 的定时任务',
+      moduleLabel: '调度中心',
+      targetLabel: '600519',
     });
-    expectReadableSummary(priorityEvent.eventSummary);
+    expectReadableSummary(createEvent.eventSummary);
+
+    const updateEvent = buildAdminLogEventView(createInput({
+      method: 'PATCH',
+      path: '/api/v1/analysis/scheduler/schedules/schedule-123',
+      moduleCode: 'analysis',
+      action: 'write',
+    }));
+
+    expect(updateEvent).toMatchObject({
+      eventType: 'schedule_update',
+      eventSummary: 'surper1更新了定时任务 schedule-123',
+      targetLabel: 'schedule-123',
+    });
+    expectReadableSummary(updateEvent.eventSummary);
+
+    const deleteEvent = buildAdminLogEventView(createInput({
+      method: 'DELETE',
+      path: '/api/v1/analysis/scheduler/schedules/schedule-123',
+      moduleCode: 'analysis',
+      action: 'write',
+    }));
+
+    expect(deleteEvent.eventSummary).toBe('surper1删除了定时任务 schedule-123');
+    expectReadableSummary(deleteEvent.eventSummary);
 
     const statusEvent = buildAdminLogEventView(createInput({
       path: '/api/v1/analysis/status/task-123',

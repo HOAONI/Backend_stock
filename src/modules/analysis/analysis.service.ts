@@ -13,6 +13,7 @@ import { PrismaService } from '@/common/database/prisma.service';
 import { safeJsonParse } from '@/common/utils/json';
 import { canonicalStockCode } from '@/common/utils/stock-code';
 import { BrokerAccountsService } from '@/modules/broker-accounts/broker-accounts.service';
+import { SystemConfigService } from '@/modules/system-config/system-config.service';
 import { TradingAccountService, TradingRuntimeContextPayload } from '@/modules/trading-account/trading-account.service';
 
 import { AnalyzeRequestDto } from './analysis.dto';
@@ -22,6 +23,8 @@ export interface RequesterScope {
   userId: number;
   includeAll: boolean;
 }
+
+type PrismaTaskClient = PrismaService | Prisma.TransactionClient;
 
 type StageCode = 'data' | 'signal' | 'risk' | 'execution';
 type StageStatus = 'pending' | 'done' | 'failed';
@@ -58,6 +61,38 @@ export interface AnalysisBrokerMeta {
 }
 
 type RequestedExecutionMode = 'auto' | 'paper';
+
+interface BuildAsyncTaskPayloadInput {
+  stockCode: string;
+  reportType: string;
+  forceRefresh: boolean;
+  userId: number;
+  executionMode?: RequestedExecutionMode;
+}
+
+interface CreatePendingAnalysisTaskInput extends BuildAsyncTaskPayloadInput {
+  scheduleId?: string | null;
+  priority?: number;
+  runAfter?: Date | null;
+  taskId?: string;
+  rootTaskId?: string | null;
+  retryOfTaskId?: string | null;
+  attemptNo?: number;
+  message?: string;
+  client?: PrismaTaskClient;
+  requestPayload?: Prisma.InputJsonValue;
+}
+
+interface CreateFailedAnalysisTaskInput {
+  stockCode: string;
+  reportType: string;
+  userId: number;
+  errorMessage: string;
+  executionMode?: RequestedExecutionMode;
+  scheduleId?: string | null;
+  message?: string;
+  client?: PrismaTaskClient;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -101,6 +136,7 @@ export class AnalysisService {
     private readonly agentRunBridge: AgentRunBridgeService,
     private readonly aiRuntimeService: AiRuntimeService,
     private readonly brokerAccountsService: BrokerAccountsService,
+    private readonly systemConfigService: SystemConfigService,
     private readonly tradingAccountService: TradingAccountService,
   ) {}
 
@@ -144,12 +180,15 @@ export class AnalysisService {
 
   // 每次执行前都按“当前用户画像 + 当前可用 AI 配置”重建 runtime，避免旧任务沿用过期配置。
   async buildRuntimeContext(userId: number, options?: { includeApiToken?: boolean }): Promise<RuntimeContext> {
-    const [profile, user] = await this.prisma.$transaction([
-      this.prisma.adminUserProfile.findUnique({ where: { userId } }),
-      this.prisma.adminUser.findUnique({
-        where: { id: userId },
-        select: { username: true },
-      }),
+    const [[profile, user], marketSource] = await Promise.all([
+      this.prisma.$transaction([
+        this.prisma.adminUserProfile.findUnique({ where: { userId } }),
+        this.prisma.adminUser.findUnique({
+          where: { id: userId },
+          select: { username: true },
+        }),
+      ]),
+      this.systemConfigService.getCurrentMarketSource(),
     ]);
 
     const resolvedLlm = await this.aiRuntimeService.resolveEffectiveLlmFromProfile(profile, {
@@ -166,6 +205,7 @@ export class AnalysisService {
             apiToken: resolvedLlm.apiToken,
           }
         : null,
+      marketSource,
     });
     return {
       runtimeConfig,
@@ -196,12 +236,54 @@ export class AnalysisService {
     return 'auto';
   }
 
+  async findActiveTaskForOwnerStock(
+    ownerUserId: number,
+    stockCode: string,
+    options?: {
+      excludeTaskId?: string | null;
+      client?: PrismaTaskClient;
+    },
+  ): Promise<{
+    id: number;
+    taskId: string;
+    status: AnalysisTaskStatus;
+    createdAt: Date;
+  } | null> {
+    const client = options?.client ?? this.prisma;
+    return await client.analysisTask.findFirst({
+      where: {
+        ownerUserId,
+        stockCode,
+        ...(options?.excludeTaskId
+          ? {
+              taskId: {
+                not: options.excludeTaskId,
+              },
+            }
+          : {}),
+        status: {
+          in: [AnalysisTaskStatus.pending, AnalysisTaskStatus.processing],
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+      select: {
+        id: true,
+        taskId: true,
+        status: true,
+        createdAt: true,
+      },
+    });
+  }
+
   private cloneRuntimeConfig(runtimeConfig: AgentRuntimeConfig): AgentRuntimeConfig {
     return {
       account: { ...runtimeConfig.account },
       ...(runtimeConfig.llm ? { llm: { ...runtimeConfig.llm } } : {}),
       strategy: { ...runtimeConfig.strategy },
       execution: runtimeConfig.execution ? { ...runtimeConfig.execution } : undefined,
+      data_source: runtimeConfig.data_source ? { ...runtimeConfig.data_source } : undefined,
       context: runtimeConfig.context
         ? {
             account_snapshot: runtimeConfig.context.account_snapshot ? { ...runtimeConfig.context.account_snapshot } : undefined,
@@ -307,6 +389,113 @@ export class AnalysisService {
     return cloned;
   }
 
+  async buildAsyncTaskPayload(input: BuildAsyncTaskPayloadInput): Promise<{
+    requestPayload: Prisma.InputJsonValue;
+    executionMeta: AnalysisBrokerMeta;
+  }> {
+    const runtime = await this.buildRuntimeContext(input.userId, {
+      includeApiToken: true,
+    });
+    const executionMeta = await this.resolveExecutionPlan(input.userId, input.executionMode);
+    const maskedRuntime = maskRuntimeConfig(this.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta));
+
+    return {
+      requestPayload: {
+        stock_code: input.stockCode,
+        report_type: input.reportType,
+        force_refresh: input.forceRefresh,
+        async_mode: true,
+        runtime_config: maskedRuntime as unknown as Prisma.InputJsonValue,
+        meta: executionMeta as unknown as Prisma.InputJsonValue,
+      },
+      executionMeta,
+    };
+  }
+
+  async createPendingAnalysisTask(input: CreatePendingAnalysisTaskInput): Promise<{
+    taskId: string;
+    status: 'pending';
+    message: string;
+  }> {
+    const client = input.client ?? this.prisma;
+    const requestPayload = input.requestPayload ?? (await this.buildAsyncTaskPayload(input)).requestPayload;
+    const taskId = input.taskId ?? randomUUID().replace(/-/g, '');
+    const rootTaskId = input.rootTaskId ?? taskId;
+
+    await client.analysisTask.create({
+      data: {
+        ownerUserId: input.userId,
+        taskId,
+        scheduleId: input.scheduleId ?? null,
+        rootTaskId,
+        retryOfTaskId: input.retryOfTaskId ?? null,
+        attemptNo: input.attemptNo ?? 1,
+        priority: input.priority ?? 100,
+        runAfter: input.runAfter ?? null,
+        stockCode: input.stockCode,
+        reportType: input.reportType,
+        status: AnalysisTaskStatus.pending,
+        progress: 0,
+        message: input.message ?? '任务已加入队列',
+        requestPayload,
+      },
+    });
+
+    return {
+      taskId,
+      status: 'pending',
+      message: input.message ?? `分析任务已加入队列: ${input.stockCode}`,
+    };
+  }
+
+  async createFailedAnalysisTask(input: CreateFailedAnalysisTaskInput): Promise<{
+    taskId: string;
+    status: 'failed';
+    message: string;
+  }> {
+    const client = input.client ?? this.prisma;
+    const taskId = randomUUID().replace(/-/g, '');
+    const now = new Date();
+    const requestedExecutionMode = this.parseRequestedExecutionMode(input.executionMode);
+    const failureMessage = input.message ?? '定时任务触发失败';
+
+    await client.analysisTask.create({
+      data: {
+        ownerUserId: input.userId,
+        taskId,
+        scheduleId: input.scheduleId ?? null,
+        rootTaskId: taskId,
+        retryOfTaskId: null,
+        attemptNo: 1,
+        priority: 100,
+        stockCode: input.stockCode,
+        reportType: input.reportType,
+        status: AnalysisTaskStatus.failed,
+        progress: 100,
+        message: failureMessage,
+        error: input.errorMessage.slice(0, 500),
+        requestPayload: {
+          stock_code: input.stockCode,
+          report_type: input.reportType,
+          force_refresh: false,
+          async_mode: true,
+          meta: {
+            requested_execution_mode: requestedExecutionMode,
+            execution_mode: 'paper',
+            broker_plan_reason: 'schedule_trigger_failed_before_queue',
+          },
+        } as Prisma.InputJsonValue,
+        completedAt: now,
+      },
+    });
+
+    return {
+      taskId,
+      status: 'failed',
+      message: failureMessage,
+    };
+  }
+
   // 同步分析也复用 Agent async bridge，避免同步/异步两条链路出现结果映射差异。
   async runSync(input: {
     stockCode: string;
@@ -371,23 +560,7 @@ export class AnalysisService {
     userId: number;
     executionMode?: RequestedExecutionMode;
   }): Promise<Record<string, unknown>> {
-    const runtime = await this.buildRuntimeContext(input.userId, {
-      includeApiToken: true,
-    });
-    const executionMeta = await this.resolveExecutionPlan(input.userId, input.executionMode);
-    const maskedRuntime = maskRuntimeConfig(this.buildRuntimeConfigForExecution(runtime.runtimeConfig, executionMeta));
-    const existing = await this.prisma.analysisTask.findFirst({
-      where: {
-        ownerUserId: input.userId,
-        stockCode: input.stockCode,
-        status: {
-          in: [AnalysisTaskStatus.pending, AnalysisTaskStatus.processing],
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
+    const existing = await this.findActiveTaskForOwnerStock(input.userId, input.stockCode);
 
     if (existing) {
       const error = new Error(`股票 ${input.stockCode} 正在分析中`);
@@ -397,36 +570,16 @@ export class AnalysisService {
       throw error;
     }
 
-    const taskId = randomUUID().replace(/-/g, '');
-    const requestPayload: Prisma.InputJsonValue = {
-      stock_code: input.stockCode,
-      report_type: input.reportType,
-      force_refresh: input.forceRefresh,
-      async_mode: true,
-      runtime_config: maskedRuntime as unknown as Prisma.InputJsonValue,
-      meta: executionMeta as unknown as Prisma.InputJsonValue,
-    };
-    await this.prisma.analysisTask.create({
-      data: {
-        ownerUserId: input.userId,
-        taskId,
-        rootTaskId: taskId,
-        retryOfTaskId: null,
-        attemptNo: 1,
-        priority: 100,
-        stockCode: input.stockCode,
-        reportType: input.reportType,
-        status: AnalysisTaskStatus.pending,
-        progress: 0,
-        message: '任务已加入队列',
-        requestPayload,
-      },
+    const payload = await this.buildAsyncTaskPayload(input);
+    const created = await this.createPendingAnalysisTask({
+      ...input,
+      requestPayload: payload.requestPayload,
     });
 
     return {
-      task_id: taskId,
-      status: 'pending',
-      message: `分析任务已加入队列: ${input.stockCode}`,
+      task_id: created.taskId,
+      status: created.status,
+      message: created.message,
     };
   }
 

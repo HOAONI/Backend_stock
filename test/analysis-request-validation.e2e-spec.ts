@@ -5,7 +5,7 @@ import { AnalysisService } from '../src/modules/analysis/analysis.service';
 describe('Analysis request validation', () => {
   // 这里只验证参数归一化，不需要真实依赖注入，直接构造最小 service 即可。
   const createService = (): AnalysisService =>
-    new AnalysisService({} as any, {} as any, {} as any, {} as any, {} as any);
+    new AnalysisService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
 
   it('rejects multi-stock payloads to avoid silent truncation', () => {
     const service = createService();

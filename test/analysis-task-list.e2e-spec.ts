@@ -17,7 +17,7 @@ describe('AnalysisService.getTaskList', () => {
       },
     } as any;
 
-    return new AnalysisService(prisma, {} as any, {} as any, {} as any, {} as any);
+    return new AnalysisService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any);
   };
 
   it('returns completed failed cancelled counts from owner-scoped aggregates', async () => {

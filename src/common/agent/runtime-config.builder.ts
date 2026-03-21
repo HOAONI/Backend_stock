@@ -28,6 +28,7 @@ export function buildRuntimeConfigFromProfile(
       hasToken?: boolean;
       apiToken?: string | null;
     } | null;
+    marketSource?: string | null;
   },
 ): AgentRuntimeConfig {
   const simulationAccountId = cleanText(profile?.simulationAccountId);
@@ -68,6 +69,13 @@ export function buildRuntimeConfigFromProfile(
       mode: 'paper',
       has_ticket: false,
     },
+    ...(cleanText(options?.marketSource)
+      ? {
+          data_source: {
+            market_source: cleanText(options?.marketSource).toLowerCase(),
+          },
+        }
+      : {}),
   };
 }
 
@@ -96,6 +104,11 @@ export function maskRuntimeConfig(runtimeConfig: AgentRuntimeConfig): AgentRunti
           ...(runtimeConfig.execution.broker_account_id != null
             ? { broker_account_id: runtimeConfig.execution.broker_account_id }
             : {}),
+        }
+      : undefined,
+    data_source: runtimeConfig.data_source
+      ? {
+          market_source: runtimeConfig.data_source.market_source,
         }
       : undefined,
   };

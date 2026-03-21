@@ -4,23 +4,37 @@ export function canonicalStockCode(code: string): string {
   return (code ?? '').trim().toUpperCase();
 }
 
-export function toYahooSymbol(code: string): string {
+export function normalizeAShareStockCode(code: string): string | null {
   const c = canonicalStockCode(code);
 
-  if (/^[A-Z]{1,5}(\.[A-Z])?$/.test(c)) {
+  if (/^\d{6}$/.test(c)) {
     return c;
   }
 
-  if (/^\d{5}$/.test(c)) {
-    return `${c}.HK`;
+  if (/^(SH|SZ)\d{6}$/.test(c)) {
+    return c.slice(2);
   }
 
-  if (/^\d{6}$/.test(c)) {
-    if (c.startsWith('6')) {
-      return `${c}.SS`;
-    }
-    return `${c}.SZ`;
+  if (/^\d{6}\.(SH|SZ|SS)$/.test(c)) {
+    return c.slice(0, 6);
   }
 
-  return c;
+  return null;
+}
+
+export function isAShareStockCode(code: string): boolean {
+  return normalizeAShareStockCode(code) != null;
+}
+
+export function toTencentSymbol(code: string): string {
+  const normalized = normalizeAShareStockCode(code);
+  if (!normalized) {
+    throw new Error('A股行情页仅支持 SH/SZ/6 位代码');
+  }
+
+  if (normalized.startsWith('6') || normalized.startsWith('5') || normalized.startsWith('9')) {
+    return `sh${normalized}`;
+  }
+
+  return `sz${normalized}`;
 }

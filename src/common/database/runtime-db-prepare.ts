@@ -19,6 +19,7 @@ export const RUNTIME_DB_HISTORY_REPAIR_MIGRATIONS = [
   '20260307193000_scheduler_center',
   '20260310050000_user_backtest_strategies',
   '20260317110000_strategy_backtest_ai_queue',
+  '20260320120000_analysis_schedule_center',
 ] as const;
 
 export type RuntimeDbSyncMode = 'prisma-deploy' | 'db-push';
@@ -135,6 +136,18 @@ export const RUNTIME_DB_HISTORY_REPAIR_TARGETS: readonly RuntimeDbRepairTarget[]
       { tableName: 'strategy_backtest_run_groups', columnName: 'ai_interpretation_completed_at' },
       { tableName: 'strategy_backtest_run_groups', columnName: 'ai_interpretation_next_retry_at' },
       { tableName: 'strategy_backtest_run_groups', columnName: 'ai_interpretation_error_message' },
+    ],
+  },
+  {
+    migrationName: '20260320120000_analysis_schedule_center',
+    requiredTables: ['analysis_schedules'],
+    requiredColumns: [
+      { tableName: 'analysis_tasks', columnName: 'schedule_id' },
+      { tableName: 'analysis_schedules', columnName: 'schedule_id' },
+      { tableName: 'analysis_schedules', columnName: 'owner_user_id' },
+      { tableName: 'analysis_schedules', columnName: 'requested_execution_mode' },
+      { tableName: 'analysis_schedules', columnName: 'interval_minutes' },
+      { tableName: 'analysis_schedules', columnName: 'next_run_at' },
     ],
   },
 ] as const;

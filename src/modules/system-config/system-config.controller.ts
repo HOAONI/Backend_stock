@@ -4,6 +4,8 @@ import { Body, Controller, Get, HttpCode, HttpException, HttpStatus, Post, Put, 
 import { ArrayMinSize, IsArray, IsBoolean, IsOptional, IsString, MinLength, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
+import { AgentClientService } from '@/common/agent/agent-client.service';
+
 import { SystemConfigService } from './system-config.service';
 
 class SystemConfigUpdateItemDto {
@@ -42,10 +44,19 @@ class ValidateSystemConfigRequestDto {
   items!: SystemConfigUpdateItemDto[];
 }
 
+class UpdateMarketSourceRequestDto {
+  @IsString()
+  @MinLength(1)
+  source!: string;
+}
+
 /** 负责定义该领域的 HTTP 接口边界，把鉴权后的请求参数整理成服务层可消费的输入。 */
 @Controller('/api/v1/system')
 export class SystemConfigController {
-  constructor(private readonly configService: SystemConfigService) {}
+  constructor(
+    private readonly configService: SystemConfigService,
+    private readonly agentClientService: AgentClientService,
+  ) {}
 
   @Get('/config')
   async getConfig(@Query('include_schema') includeSchema = 'true'): Promise<Record<string, unknown>> {
@@ -56,6 +67,82 @@ export class SystemConfigController {
   @Get('/config/schema')
   async getSchema(): Promise<Record<string, unknown>> {
     return await this.configService.getSchema();
+  }
+
+  @Get('/market-source')
+  async getMarketSource(): Promise<Record<string, unknown>> {
+    try {
+      const [setting, optionsPayload] = await Promise.all([
+        this.configService.getMarketSourceSetting(),
+        this.agentClientService.getRuntimeMarketSources(),
+      ]);
+
+      return {
+        currentSource: setting.value,
+        options: optionsPayload.options,
+        updatedAt: setting.updatedAt?.toISOString() ?? null,
+      };
+    } catch (error: unknown) {
+      throw new HttpException(
+        {
+          error: 'upstream_error',
+          message: `Failed to load market source options: ${(error as Error).message}`,
+        },
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+  }
+
+  @Put('/market-source')
+  async updateMarketSource(@Body() body: UpdateMarketSourceRequestDto): Promise<Record<string, unknown>> {
+    const source = String(body.source ?? '').trim().toLowerCase();
+
+    try {
+      const optionsPayload = await this.agentClientService.getRuntimeMarketSources();
+      const option = optionsPayload.options.find(item => String(item.code ?? '').trim().toLowerCase() === source);
+
+      if (!option) {
+        throw new HttpException(
+          {
+            error: 'validation_error',
+            message: `Unsupported market source: ${source || '<empty>'}`,
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+
+      if (!option.available) {
+        throw new HttpException(
+          {
+            error: 'validation_error',
+            message: option.reason
+              ? `Market source ${source} is unavailable: ${option.reason}`
+              : `Market source ${source} is unavailable`,
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+
+      const updated = await this.configService.updateMarketSource(source);
+      return {
+        success: true,
+        currentSource: updated.source,
+        updatedAt: updated.updatedAt.toISOString(),
+        configVersion: updated.configVersion,
+      };
+    } catch (error: unknown) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      throw new HttpException(
+        {
+          error: 'upstream_error',
+          message: `Failed to update market source: ${(error as Error).message}`,
+        },
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
   }
 
   @Post('/config/validate')

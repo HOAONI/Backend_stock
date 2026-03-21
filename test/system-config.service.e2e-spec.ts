@@ -1,5 +1,5 @@
 import { LOCKED_SYSTEM_STRATEGY_EDIT_REASON } from '../src/modules/system-config/system-config.policy';
-import { SystemConfigService } from '../src/modules/system-config/system-config.service';
+import { DEFAULT_MARKET_DATA_SOURCE, MARKET_DATA_SOURCE_KEY, SystemConfigService } from '../src/modules/system-config/system-config.service';
 
 function createPrismaMock(input?: {
   rows?: Array<Record<string, unknown>>;
@@ -9,6 +9,16 @@ function createPrismaMock(input?: {
     systemConfigItem: {
       count: jest.fn(async () => 1),
       findMany: jest.fn(async () => input?.rows ?? []),
+      findUnique: jest.fn(async ({ where }: Record<string, any>) => {
+        const row = (input?.rows ?? []).find(item => item.key === where?.key);
+        return row
+          ? {
+              key: row.key,
+              value: row.value,
+              updatedAt: row.updatedAt ?? new Date('2026-03-20T00:00:00.000Z'),
+            }
+          : null;
+      }),
       upsert: jest.fn(async ({ create, update }: Record<string, any>) => ({ ...create, ...update })),
       createMany: jest.fn(async () => ({ count: 0 })),
     },
@@ -101,6 +111,28 @@ describe('SystemConfigService', () => {
       where: { key: 'PORT' },
       update: expect.objectContaining({
         value: '9000',
+      }),
+    }));
+  });
+
+  it('returns default market source when config row is missing', async () => {
+    const prisma = createPrismaMock({ rows: [] });
+    const service = new SystemConfigService(prisma as any);
+
+    await expect(service.getCurrentMarketSource()).resolves.toBe(DEFAULT_MARKET_DATA_SOURCE);
+  });
+
+  it('persists market source into builtin config key', async () => {
+    const prisma = createPrismaMock();
+    const service = new SystemConfigService(prisma as any);
+
+    const result = await service.updateMarketSource('sina');
+
+    expect(result.source).toBe('sina');
+    expect(prisma.systemConfigItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { key: MARKET_DATA_SOURCE_KEY },
+      update: expect.objectContaining({
+        value: 'sina',
       }),
     }));
   });

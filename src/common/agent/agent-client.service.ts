@@ -14,6 +14,18 @@ export interface AgentRuntimeLlmDefaultPayload {
   has_token?: boolean;
 }
 
+export interface AgentRuntimeMarketSourceOptionPayload {
+  code: string;
+  label: string;
+  description: string;
+  available: boolean;
+  reason?: string | null;
+}
+
+export interface AgentRuntimeMarketSourcesPayload {
+  options: AgentRuntimeMarketSourceOptionPayload[];
+}
+
 /** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class AgentClientService {
@@ -32,6 +44,18 @@ export class AgentClientService {
   private sanitizeMessage(input: unknown, fallback: string): string {
     const message = String(input ?? '').trim();
     return (message || fallback).slice(0, 500);
+  }
+
+  private buildQuery(params: Record<string, string | number | null | undefined>): string {
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value == null || value === '') {
+        continue;
+      }
+      search.set(key, String(value));
+    }
+    const serialized = search.toString();
+    return serialized ? `?${serialized}` : '';
   }
 
   private isHttpRetryable(statusCode: number): boolean {
@@ -186,5 +210,54 @@ export class AgentClientService {
 
   async getRuntimeLlmDefault(): Promise<AgentRuntimeLlmDefaultPayload> {
     return await this.request<AgentRuntimeLlmDefaultPayload>('/internal/v1/runtime/llm-default');
+  }
+
+  async getRuntimeMarketSources(): Promise<AgentRuntimeMarketSourcesPayload> {
+    return await this.request<AgentRuntimeMarketSourcesPayload>('/internal/v1/runtime/market-sources');
+  }
+
+  async getInternalStockQuote(stockCode: string, marketSource: string): Promise<Record<string, unknown>> {
+    return await this.request<Record<string, unknown>>(
+      `/internal/v1/stocks/${encodeURIComponent(stockCode)}/quote${this.buildQuery({ market_source: marketSource })}`,
+    );
+  }
+
+  async getInternalStockHistory(stockCode: string, marketSource: string, days: number): Promise<Record<string, unknown>> {
+    return await this.request<Record<string, unknown>>(
+      `/internal/v1/stocks/${encodeURIComponent(stockCode)}/history${this.buildQuery({
+        market_source: marketSource,
+        period: 'daily',
+        days,
+      })}`,
+    );
+  }
+
+  async getInternalStockIndicators(
+    stockCode: string,
+    marketSource: string,
+    days: number,
+    windows: number[],
+  ): Promise<Record<string, unknown>> {
+    return await this.request<Record<string, unknown>>(
+      `/internal/v1/stocks/${encodeURIComponent(stockCode)}/indicators${this.buildQuery({
+        market_source: marketSource,
+        period: 'daily',
+        days,
+        windows: windows.join(','),
+      })}`,
+    );
+  }
+
+  async getInternalStockFactors(
+    stockCode: string,
+    marketSource: string,
+    date?: string,
+  ): Promise<Record<string, unknown>> {
+    return await this.request<Record<string, unknown>>(
+      `/internal/v1/stocks/${encodeURIComponent(stockCode)}/factors${this.buildQuery({
+        market_source: marketSource,
+        date,
+      })}`,
+    );
   }
 }

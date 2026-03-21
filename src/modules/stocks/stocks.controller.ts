@@ -17,6 +17,7 @@ import { memoryStorage } from 'multer';
 
 import { ALLOWED_MIME, ImageStockExtractorService, MAX_SIZE_BYTES } from '@/common/image/image-stock-extractor.service';
 
+import { isStocksUpstreamError, isStocksValidationError } from './stocks.errors';
 import { StocksService } from './stocks.service';
 
 /** 负责定义该领域的 HTTP 接口边界，把鉴权后的请求参数整理成服务层可消费的输入。 */
@@ -34,6 +35,40 @@ export class StocksController {
       .filter((item) => Number.isFinite(item));
     const cleaned = raw.filter((item) => item > 0 && item <= 250).map((item) => Math.trunc(item));
     return Array.from(new Set(cleaned));
+  }
+
+  private rethrowStocksError(action: string, error: unknown): never {
+    if (error instanceof HttpException) {
+      throw error;
+    }
+
+    if (isStocksValidationError(error)) {
+      throw new HttpException(
+        {
+          error: 'validation_error',
+          message: error.message,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    if (isStocksUpstreamError(error)) {
+      throw new HttpException(
+        {
+          error: 'upstream_error',
+          message: `${action}失败: ${error.message}`,
+        },
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+
+    throw new HttpException(
+      {
+        error: 'internal_error',
+        message: `${action}失败: ${(error as Error).message}`,
+      },
+      HttpStatus.INTERNAL_SERVER_ERROR,
+    );
   }
 
   @Post('/extract-from-image')
@@ -83,29 +118,9 @@ export class StocksController {
   @Get('/:stock_code/quote')
   async getQuote(@Param('stock_code') stockCode: string): Promise<Record<string, unknown>> {
     try {
-      const quote = await this.stocksService.getRealtimeQuote(stockCode);
-      if (!quote) {
-        throw new HttpException(
-          {
-            error: 'not_found',
-            message: `未找到股票 ${stockCode} 的行情数据`,
-          },
-          HttpStatus.NOT_FOUND,
-        );
-      }
-      return quote;
+      return await this.stocksService.getRealtimeQuote(stockCode);
     } catch (error: unknown) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-
-      throw new HttpException(
-        {
-          error: 'internal_error',
-          message: `获取实时行情失败: ${(error as Error).message}`,
-        },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      this.rethrowStocksError('获取实时行情', error);
     }
   }
 
@@ -151,13 +166,7 @@ export class StocksController {
     try {
       return await this.stocksService.getIndicators(stockCode, parsedDays, parsedWindows);
     } catch (error: unknown) {
-      throw new HttpException(
-        {
-          error: 'internal_error',
-          message: `获取指标数据失败: ${(error as Error).message}`,
-        },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      this.rethrowStocksError('获取指标数据', error);
     }
   }
 
@@ -179,6 +188,10 @@ export class StocksController {
     try {
       return await this.stocksService.getFactors(stockCode, date);
     } catch (error: unknown) {
+      if (isStocksValidationError(error) || isStocksUpstreamError(error)) {
+        this.rethrowStocksError('获取因子数据', error);
+      }
+
       const message = (error as Error).message || '获取因子数据失败';
       if (message.includes('No available daily bar')) {
         throw new HttpException(
@@ -230,13 +243,7 @@ export class StocksController {
     try {
       return await this.stocksService.getHistory(stockCode, parsedDays);
     } catch (error: unknown) {
-      throw new HttpException(
-        {
-          error: 'internal_error',
-          message: `获取历史数据失败: ${(error as Error).message}`,
-        },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      this.rethrowStocksError('获取历史数据', error);
     }
   }
 }

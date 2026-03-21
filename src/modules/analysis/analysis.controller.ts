@@ -1,11 +1,11 @@
 /** 股票分析模块的控制器入口，负责承接 HTTP 请求并把权限后的参数转发到服务层。 */
 
-import { Body, Controller, Get, HttpException, HttpStatus, Param, Patch, Post, Query, Req, Res, Sse } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpException, HttpStatus, Param, Patch, Post, Query, Req, Res, Sse } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { interval, Observable, of, startWith, switchMap } from 'rxjs';
 
 import { BUILTIN_ROLE_CODES } from '@/common/auth/rbac.constants';
-import { AnalyzeRequestDto } from './analysis.dto';
+import { AnalyzeRequestDto, CreateAnalysisScheduleDto, UpdateAnalysisScheduleDto } from './analysis.dto';
 import { AnalysisSchedulerService } from './analysis-scheduler.service';
 import { AnalysisService } from './analysis.service';
 
@@ -34,13 +34,6 @@ export class AnalysisController {
     };
   }
 
-  private parseBooleanFlag(value: string | boolean | null | undefined): boolean {
-    if (typeof value === 'boolean') {
-      return value;
-    }
-    return String(value ?? '').trim().toLowerCase() === 'true';
-  }
-
   private throwSchedulerError(error: unknown): never {
     const err = error as Error & { code?: string };
     if (err.code === 'VALIDATION_ERROR') {
@@ -49,7 +42,7 @@ export class AnalysisController {
     if (err.code === 'FORBIDDEN') {
       throw new HttpException({ error: 'forbidden', message: err.message }, HttpStatus.FORBIDDEN);
     }
-    if (err.code === 'INVALID_TASK_STATUS' || err.code === 'DUPLICATE_TASK') {
+    if (err.code === 'INVALID_TASK_STATUS' || err.code === 'DUPLICATE_TASK' || err.code === 'DUPLICATE_SCHEDULE') {
       throw new HttpException({ error: 'conflict', message: err.message }, HttpStatus.CONFLICT);
     }
     throw new HttpException(
@@ -189,75 +182,70 @@ export class AnalysisController {
     );
   }
 
-  // 调度中心接口统一走同一套错误映射，保证前端拿到稳定的 conflict/forbidden/validation 语义。
-  @Get('/scheduler/overview')
-  async schedulerOverview(
-    @Req() req: Request,
-    @Query('scope') requestedScope: string | null = null,
-  ): Promise<Record<string, unknown>> {
+  @Get('/scheduler/schedules')
+  async schedulerSchedules(@Req() req: Request): Promise<Record<string, unknown>> {
     try {
       const scope = this.getRequesterScope(req);
-      return await this.analysisSchedulerService.getOverview(scope, requestedScope);
+      return await this.analysisSchedulerService.listSchedules(scope);
     } catch (error: unknown) {
       this.throwSchedulerError(error);
     }
   }
 
-  @Get('/scheduler/health')
-  async schedulerHealth(): Promise<Record<string, unknown>> {
+  @Post('/scheduler/schedules')
+  async schedulerCreateSchedule(
+    @Body() body: CreateAnalysisScheduleDto,
+    @Req() req: Request,
+  ): Promise<Record<string, unknown>> {
     try {
-      return await this.analysisSchedulerService.getHealth();
+      const scope = this.getRequesterScope(req);
+      return await this.analysisSchedulerService.createSchedule(body as unknown as Record<string, unknown>, scope);
     } catch (error: unknown) {
       this.throwSchedulerError(error);
     }
   }
 
-  @Get('/scheduler/tasks')
-  async schedulerTasks(
+  @Get('/scheduler/schedules/:schedule_id')
+  async schedulerScheduleDetail(@Param('schedule_id') scheduleId: string, @Req() req: Request): Promise<Record<string, unknown>> {
+    try {
+      const scope = this.getRequesterScope(req);
+      const result = await this.analysisSchedulerService.getScheduleDetail(scheduleId, scope);
+      if (!result) {
+        throw new HttpException(
+          {
+            error: 'not_found',
+            message: `定时任务 ${scheduleId} 不存在或无权限访问`,
+          },
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      return result;
+    } catch (error: unknown) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.throwSchedulerError(error);
+    }
+  }
+
+  @Patch('/scheduler/schedules/:schedule_id')
+  async schedulerUpdateSchedule(
+    @Param('schedule_id') scheduleId: string,
+    @Body() body: UpdateAnalysisScheduleDto,
     @Req() req: Request,
-    @Query('page') page = '1',
-    @Query('limit') limit = '20',
-    @Query('status') status: string | null = null,
-    @Query('stock_code') stockCode: string | null = null,
-    @Query('username') username: string | null = null,
-    @Query('execution_mode') executionMode: string | null = null,
-    @Query('stale_only') staleOnly: string | null = null,
-    @Query('start_date') startDate: string | null = null,
-    @Query('end_date') endDate: string | null = null,
-    @Query('scope') requestedScope: string | null = null,
   ): Promise<Record<string, unknown>> {
     try {
       const scope = this.getRequesterScope(req);
-      return await this.analysisSchedulerService.listTasks(
-        {
-          page: Number(page),
-          limit: Number(limit),
-          status,
-          stockCode,
-          username,
-          executionMode,
-          staleOnly: this.parseBooleanFlag(staleOnly),
-          startDate,
-          endDate,
-          scope: requestedScope as 'mine' | 'all' | null,
-        },
+      const result = await this.analysisSchedulerService.updateSchedule(
+        scheduleId,
+        body as unknown as Record<string, unknown>,
         scope,
       );
-    } catch (error: unknown) {
-      this.throwSchedulerError(error);
-    }
-  }
-
-  @Get('/scheduler/tasks/:task_id')
-  async schedulerTaskDetail(@Param('task_id') taskId: string, @Req() req: Request): Promise<Record<string, unknown>> {
-    try {
-      const scope = this.getRequesterScope(req);
-      const result = await this.analysisSchedulerService.getTaskDetail(taskId, scope);
       if (!result) {
         throw new HttpException(
           {
             error: 'not_found',
-            message: `任务 ${taskId} 不存在或无权限访问`,
+            message: `定时任务 ${scheduleId} 不存在或无权限访问`,
           },
           HttpStatus.NOT_FOUND,
         );
@@ -271,89 +259,16 @@ export class AnalysisController {
     }
   }
 
-  @Post('/scheduler/tasks/:task_id/retry')
-  async schedulerRetryTask(@Param('task_id') taskId: string, @Req() req: Request): Promise<Record<string, unknown>> {
+  @Delete('/scheduler/schedules/:schedule_id')
+  async schedulerDeleteSchedule(@Param('schedule_id') scheduleId: string, @Req() req: Request): Promise<Record<string, unknown>> {
     try {
       const scope = this.getRequesterScope(req);
-      const result = await this.analysisSchedulerService.retryTask(taskId, scope);
+      const result = await this.analysisSchedulerService.deleteSchedule(scheduleId, scope);
       if (!result) {
         throw new HttpException(
           {
             error: 'not_found',
-            message: `任务 ${taskId} 不存在或无权限访问`,
-          },
-          HttpStatus.NOT_FOUND,
-        );
-      }
-      return result;
-    } catch (error: unknown) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      this.throwSchedulerError(error);
-    }
-  }
-
-  @Post('/scheduler/tasks/:task_id/rerun')
-  async schedulerRerunTask(@Param('task_id') taskId: string, @Req() req: Request): Promise<Record<string, unknown>> {
-    try {
-      const scope = this.getRequesterScope(req);
-      const result = await this.analysisSchedulerService.rerunTask(taskId, scope);
-      if (!result) {
-        throw new HttpException(
-          {
-            error: 'not_found',
-            message: `任务 ${taskId} 不存在或无权限访问`,
-          },
-          HttpStatus.NOT_FOUND,
-        );
-      }
-      return result;
-    } catch (error: unknown) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      this.throwSchedulerError(error);
-    }
-  }
-
-  @Post('/scheduler/tasks/:task_id/cancel')
-  async schedulerCancelTask(@Param('task_id') taskId: string, @Req() req: Request): Promise<Record<string, unknown>> {
-    try {
-      const scope = this.getRequesterScope(req);
-      const result = await this.analysisSchedulerService.cancelTask(taskId, scope);
-      if (!result) {
-        throw new HttpException(
-          {
-            error: 'not_found',
-            message: `任务 ${taskId} 不存在或无权限访问`,
-          },
-          HttpStatus.NOT_FOUND,
-        );
-      }
-      return result;
-    } catch (error: unknown) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      this.throwSchedulerError(error);
-    }
-  }
-
-  @Patch('/scheduler/tasks/:task_id/priority')
-  async schedulerUpdatePriority(
-    @Param('task_id') taskId: string,
-    @Body() body: Record<string, unknown>,
-    @Req() req: Request,
-  ): Promise<Record<string, unknown>> {
-    try {
-      const scope = this.getRequesterScope(req);
-      const result = await this.analysisSchedulerService.updatePriority(taskId, body.priority, scope);
-      if (!result) {
-        throw new HttpException(
-          {
-            error: 'not_found',
-            message: `任务 ${taskId} 不存在或无权限访问`,
+            message: `定时任务 ${scheduleId} 不存在或无权限访问`,
           },
           HttpStatus.NOT_FOUND,
         );

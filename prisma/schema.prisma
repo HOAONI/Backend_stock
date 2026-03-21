@@ -418,6 +418,7 @@ model AnalysisTask {
   id             Int                @id @default(autoincrement())
   ownerUserId    Int?               @map("owner_user_id")
   taskId         String             @unique @map("task_id") @db.VarChar(64)
+  scheduleId     String?            @map("schedule_id") @db.VarChar(64)
   rootTaskId     String?            @map("root_task_id") @db.VarChar(64)
   retryOfTaskId  String?            @map("retry_of_task_id") @db.VarChar(64)
   attemptNo      Int                @default(1) @map("attempt_no")
@@ -438,6 +439,7 @@ model AnalysisTask {
   completedAt    DateTime?          @map("completed_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
   ownerUser      AdminUser?         @relation("AnalysisTaskOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  schedule       AnalysisSchedule?  @relation("AnalysisScheduleTasks", fields: [scheduleId], references: [scheduleId], onDelete: SetNull)
 
   @@index([status, createdAt], map: "ix_analysis_tasks_status_created")
   @@index([status, priority, createdAt], map: "ix_analysis_tasks_status_priority_created")
@@ -445,7 +447,38 @@ model AnalysisTask {
   @@index([stockCode, status], map: "ix_analysis_tasks_stock_status")
   @@index([ownerUserId, createdAt], map: "ix_analysis_tasks_owner_created")
   @@index([rootTaskId, attemptNo], map: "ix_analysis_tasks_root_attempt")
+  @@index([scheduleId, createdAt], map: "ix_analysis_tasks_schedule_created")
   @@map("analysis_tasks")
+}
+
+model AnalysisSchedule {
+  id                     Int            @id @default(autoincrement())
+  scheduleId             String         @unique @map("schedule_id") @db.VarChar(64)
+  ownerUserId            Int            @map("owner_user_id")
+  stockCode              String         @map("stock_code") @db.VarChar(16)
+  reportType             String         @default("detailed") @map("report_type") @db.VarChar(16)
+  requestedExecutionMode String         @default("auto") @map("requested_execution_mode") @db.VarChar(16)
+  intervalMinutes        Int            @map("interval_minutes")
+  enabled                Boolean        @default(true)
+  nextRunAt              DateTime       @map("next_run_at")
+  lastTriggeredAt        DateTime?      @map("last_triggered_at")
+  lastTaskId             String?        @map("last_task_id") @db.VarChar(64)
+  lastTaskStatus         String?        @map("last_task_status") @db.VarChar(16)
+  lastTaskMessage        String?        @map("last_task_message") @db.VarChar(500)
+  lastCompletedAt        DateTime?      @map("last_completed_at")
+  lastSkippedAt          DateTime?      @map("last_skipped_at")
+  lastSkippedReason      String?        @map("last_skipped_reason") @db.VarChar(200)
+  pausedAt               DateTime?      @map("paused_at")
+  createdAt              DateTime       @default(now()) @map("created_at")
+  updatedAt              DateTime       @updatedAt @map("updated_at")
+
+  ownerUser AdminUser     @relation("AnalysisScheduleOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  tasks     AnalysisTask[] @relation("AnalysisScheduleTasks")
+
+  @@unique([ownerUserId, stockCode, intervalMinutes, requestedExecutionMode], map: "uix_analysis_schedules_owner_stock_interval_mode")
+  @@index([ownerUserId, enabled, nextRunAt], map: "ix_analysis_schedules_owner_enabled_next_run")
+  @@index([enabled, nextRunAt], map: "ix_analysis_schedules_enabled_next_run")
+  @@map("analysis_schedules")
 }
 
 model SchedulerWorkerHeartbeat {
@@ -503,6 +536,7 @@ model AdminUser {
   auditLogs AdminAuditLog[]
   profile   AdminUserProfile?
   ownedAnalysisTasks      AnalysisTask[]    @relation("AnalysisTaskOwner")
+  ownedAnalysisSchedules  AnalysisSchedule[] @relation("AnalysisScheduleOwner")
   ownedAnalysisHistory    AnalysisHistory[] @relation("AnalysisHistoryOwner")
   ownedNews               NewsIntel[]       @relation("NewsIntelOwner")
   ownedBacktestResults    BacktestResult[]  @relation("BacktestResultOwner")
