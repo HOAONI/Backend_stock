@@ -32,16 +32,18 @@ describe('StocksService', () => {
       stock_code: '600519',
       stock_name: '贵州茅台',
       current_price: 1452.87,
-      source: 'sina',
+      source: 'tencent',
+      requested_source: 'eastmoney',
+      warning: '实时行情源 东方财富 暂不可用，已自动降级到 腾讯行情',
     };
     const { service, agentClient, configService } = createService({
-      marketSource: 'sina',
+      marketSource: 'eastmoney',
       getInternalStockQuote: jest.fn(async () => payload),
     });
 
     await expect(service.getRealtimeQuote('SH600519')).resolves.toBe(payload);
     expect(configService.getCurrentMarketSource).toHaveBeenCalledTimes(1);
-    expect(agentClient.getInternalStockQuote).toHaveBeenCalledWith('600519', 'sina');
+    expect(agentClient.getInternalStockQuote).toHaveBeenCalledWith('600519', 'eastmoney');
   });
 
   it('forwards history, indicators and factors through Agent internal market API', async () => {

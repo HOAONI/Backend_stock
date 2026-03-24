@@ -17,6 +17,12 @@
 
 ## 快速启动
 
+如果你是在一台空白机器上同时克隆 `Frontend_stock + Backend_stock + Agent_stock` 三个仓库，请优先阅读：
+
+- [StockSystemHub 主安装文档](https://github.com/HOAONI/StockSystemHub/blob/main/INSTALL_FULL_STACK_FROM_SCRATCH.md)
+
+那份文档按“只有 3 个 GitHub 仓库”的前提编写，不依赖当前工作区额外的根目录聚合脚本；本仓库 `docs/INSTALL_FULL_STACK_FROM_SCRATCH.md` 只保留跳转说明。
+
 ```bash
 cp .env.example .env
 pnpm install
@@ -26,7 +32,7 @@ pnpm start:dev:all
 
 `start:dev:all` 会在同一进程启 API + Worker，适合只运行 `Backend_stock`。
 
-若需要一键启动整套系统（`Agent_stock` + `Backend_stock` + `Frontend_stock`），请回到仓库根目录执行：
+若你本地另外维护了一个包含 3 个仓库的聚合工作区，并且那个工作区根目录里额外存在 `scripts/system/*.sh`，可以再使用下面这套一键脚本：
 
 ```bash
 cd ..
@@ -38,7 +44,7 @@ bash scripts/system/start.sh --prepare-db
 bash scripts/system/start.sh --dev-backend --prepare-db
 ```
 
-根目录系统脚本默认只会按当前 `Backend_stock/.env` 中的 `DATABASE_URL` 做一次只读 schema 检查，再启动三服务；不会复用 `db:init`，也不会改写现有连接串。默认检查日志写入 `/tmp/stocksim/logs/backend-db-check.log`。只有显式传入 `--prepare-db` 时，才会执行重型 schema prepare，并把详细日志写入 `/tmp/stocksim/logs/backend-db-prepare.log`。
+这组根目录系统脚本默认只会按当前 `Backend_stock/.env` 中的 `DATABASE_URL` 做一次只读 schema 检查，再启动三服务；不会复用 `db:init`，也不会改写现有连接串。默认检查日志写入 `/tmp/stocksim/logs/backend-db-check.log`。只有显式传入 `--prepare-db` 时，才会执行重型 schema prepare，并把详细日志写入 `/tmp/stocksim/logs/backend-db-prepare.log`。
 
 如果默认检查提示 “Prisma migration 历史未收尾，但对应 schema 结构已经存在”，先在 `Backend_stock` 目录执行一次：
 
@@ -56,7 +62,7 @@ bash scripts/system/stop.sh
 命令分层：
 
 - `start:*` 用于 `Backend_stock` 进程级入口（API / Worker）。
-- 根目录 `scripts/system/*.sh` 用于整套系统入口（Agent + Backend + Frontend）。
+- 根目录 `scripts/system/*.sh` 仅用于“你本地自己维护的聚合工作区”里的整套系统入口（Agent + Backend + Frontend）；单独从 GitHub clone 3 个仓库时，请按上面的安装文档手动启动。
 
 若数据库是已存在实例且未跑 `db:init`，至少先执行一次：
 

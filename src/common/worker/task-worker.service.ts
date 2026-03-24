@@ -89,6 +89,10 @@ function parseTradingSessions(raw: string): Array<{ start: number; end: number }
     .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.start >= 0 && item.end > item.start);
 }
 
+const DEFAULT_STALE_TASK_TIMEOUT_MS = 15 * 60 * 1000;
+const STALE_TASK_ERROR_CODE = 'task_stale_timeout';
+const STALE_TASK_ERROR_MESSAGE = '任务执行超时或 worker 已中断';
+
 /** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
 @Injectable()
 export class TaskWorkerService {
@@ -110,10 +114,14 @@ export class TaskWorkerService {
     this.running = true;
     this.logger.log('Task worker started');
     await this.reportHeartbeat();
+    await this.recoverStaleProcessingTasks();
 
     while (this.running) {
       try {
-        const processed = await this.analysisSchedulerService.triggerNextDueSchedule() || await this.processOne();
+        const recovered = await this.recoverStaleProcessingTasks();
+        const triggeredSchedule = await this.analysisSchedulerService.triggerNextDueSchedule();
+        const processedTask = triggeredSchedule ? false : await this.processOne();
+        const processed = recovered || triggeredSchedule || processedTask;
         await this.reportHeartbeat();
         if (!processed) {
           await this.sleep(1500);
@@ -125,6 +133,106 @@ export class TaskWorkerService {
         await this.sleep(2000);
       }
     }
+  }
+
+  private staleTaskTimeoutMs(): number {
+    const raw = Number(process.env.ANALYSIS_TASK_STALE_TIMEOUT_MS ?? `${DEFAULT_STALE_TASK_TIMEOUT_MS}`);
+    if (!Number.isFinite(raw) || raw <= 0) {
+      return DEFAULT_STALE_TASK_TIMEOUT_MS;
+    }
+    return Math.floor(raw);
+  }
+
+  private staleTaskFailure(): {
+    code: string;
+    message: string;
+    uiMessage: string;
+    errorText: string;
+  } {
+    return {
+      code: STALE_TASK_ERROR_CODE,
+      message: STALE_TASK_ERROR_MESSAGE,
+      uiMessage: `分析失败(${STALE_TASK_ERROR_CODE}): ${STALE_TASK_ERROR_MESSAGE}`.slice(0, 200),
+      errorText: `[${STALE_TASK_ERROR_CODE}] ${STALE_TASK_ERROR_MESSAGE}`.slice(0, 500),
+    };
+  }
+
+  private async recoverStaleProcessingTasks(now = new Date()): Promise<boolean> {
+    const cutoff = new Date(now.getTime() - this.staleTaskTimeoutMs());
+    const staleTasks = await this.prisma.analysisTask.findMany({
+      where: {
+        status: AnalysisTaskStatus.processing,
+        completedAt: null,
+        startedAt: {
+          lte: cutoff,
+        },
+      },
+      select: {
+        id: true,
+        taskId: true,
+        scheduleId: true,
+        startedAt: true,
+        resultPayload: true,
+      },
+      orderBy: {
+        startedAt: 'asc',
+      },
+    });
+
+    if (staleTasks.length === 0) {
+      return false;
+    }
+
+    const failure = this.staleTaskFailure();
+    const completedAt = new Date(now);
+    let recoveredAny = false;
+
+    for (const task of staleTasks) {
+      const existingPayload = asRecord(task.resultPayload) ?? {};
+      const recovered = await this.prisma.analysisTask.updateMany({
+        where: {
+          id: task.id,
+          status: AnalysisTaskStatus.processing,
+          completedAt: null,
+          startedAt: {
+            lte: cutoff,
+          },
+        },
+        data: {
+          status: AnalysisTaskStatus.failed,
+          progress: 100,
+          message: failure.uiMessage,
+          error: failure.errorText,
+          resultPayload: {
+            ...existingPayload,
+            error: {
+              code: failure.code,
+              message: failure.message,
+            },
+          } as any,
+          completedAt,
+          updatedAt: completedAt,
+        },
+      });
+
+      if (recovered.count === 0) {
+        continue;
+      }
+
+      recoveredAny = true;
+      this.logger.warn(
+        `Recovered stale analysis task ${task.taskId} (startedAt=${task.startedAt?.toISOString() ?? 'unknown'})`,
+      );
+      await this.syncScheduleState({
+        scheduleId: task.scheduleId,
+        taskId: task.taskId,
+        status: 'failed',
+        message: failure.uiMessage,
+        completedAt,
+      });
+    }
+
+    return recoveredAny;
   }
 
   stop(): void {
