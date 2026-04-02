@@ -10,6 +10,7 @@ import { AuthGuardMiddleware } from './common/auth/auth-guard.middleware';
 import { AuditLogMiddleware } from './common/auth/audit-log.middleware';
 import { WorkerModule } from './common/worker/worker.module';
 import { AnalysisModule } from './modules/analysis/analysis.module';
+import { AgentChatModule } from './modules/agent-chat/agent-chat.module';
 import { AdminLogsModule } from './modules/admin-logs/admin-logs.module';
 import { AdminRolesModule } from './modules/admin-roles/admin-roles.module';
 import { AdminUsersModule } from './modules/admin-users/admin-users.module';
@@ -40,6 +41,7 @@ import { UserSettingsModule } from './modules/user-settings/user-settings.module
     BacktestModule,
     StocksModule,
     UserSettingsModule,
+    AgentChatModule,
     AdminUsersModule,
     AdminRolesModule,
     AdminLogsModule,
