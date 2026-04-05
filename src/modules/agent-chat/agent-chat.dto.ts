@@ -44,6 +44,16 @@ export class AgentChatInternalAccountStateDto {
   refresh?: boolean;
 }
 
+export class AgentChatInternalPortfolioHealthDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  owner_user_id!: number;
+
+  @IsOptional()
+  refresh?: boolean;
+}
+
 export class AgentChatInternalUserPreferencesDto {
   @Type(() => Number)
   @IsInt()

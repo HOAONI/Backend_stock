@@ -7,6 +7,7 @@ import {
   AgentChatInternalBacktestDto,
   AgentChatInternalHistoryDto,
   AgentChatInternalPlaceOrderDto,
+  AgentChatInternalPortfolioHealthDto,
   AgentChatInternalRuntimeContextDto,
   AgentChatInternalSaveAnalysisDto,
   AgentChatInternalUserPreferencesDto,
@@ -76,6 +77,19 @@ export class AgentChatInternalController {
     requireInternalToken(authorization);
     try {
       return await this.agentChatService.getAccountStateForAgent(body.owner_user_id, Boolean(body.refresh ?? true));
+    } catch (error: unknown) {
+      throw toHttpException(error);
+    }
+  }
+
+  @Post('/portfolio-health')
+  async portfolioHealth(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: AgentChatInternalPortfolioHealthDto,
+  ): Promise<Record<string, unknown>> {
+    requireInternalToken(authorization);
+    try {
+      return await this.agentChatService.getPortfolioHealthForAgent(body.owner_user_id, Boolean(body.refresh ?? true));
     } catch (error: unknown) {
       throw toHttpException(error);
     }

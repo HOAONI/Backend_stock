@@ -245,6 +245,24 @@ export class AgentChatService {
     };
   }
 
+  async getPortfolioHealthForAgent(ownerUserId: number, refresh = true): Promise<Record<string, unknown>> {
+    const simulationAccount = await this.brokerAccountsService.getMySimulationAccountStatus(ownerUserId);
+    let portfolioHealth: Record<string, unknown> | null = null;
+
+    if (simulationAccount.is_bound && simulationAccount.is_verified) {
+      try {
+        portfolioHealth = await this.tradingAccountService.getPortfolioHealth(ownerUserId, refresh) as unknown as Record<string, unknown>;
+      } catch {
+        portfolioHealth = null;
+      }
+    }
+
+    return {
+      simulation_account: simulationAccount,
+      portfolio_health: portfolioHealth,
+    };
+  }
+
   async getUserPreferencesForAgent(
     ownerUserId: number,
     sessionOverrides?: Record<string, unknown>,

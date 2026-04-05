@@ -15,6 +15,25 @@ interface ServiceError extends Error {
   statusCode?: number;
 }
 
+type NormalizedPositionItem = Record<string, unknown> & {
+  code: string;
+  stock_name: string | null;
+  quantity: number;
+  available_qty: number;
+  avg_cost: number | null;
+  last_price: number | null;
+  market_value: number | null;
+  industry_name: string | null;
+};
+
+type PortfolioHealthPositionItem = NormalizedPositionItem & {
+  cost_basis: number | null;
+  unrealized_pnl: number | null;
+  unrealized_return_pct: number | null;
+  weight_pct: number | null;
+  invested_weight_pct: number | null;
+};
+
 function createServiceError(code: string, message: string, statusCode?: number): ServiceError {
   const error = new Error(message) as ServiceError;
   error.code = code;
@@ -42,12 +61,32 @@ function normalizeText(value: unknown, max = 128): string | null {
   return text.slice(0, max);
 }
 
-function normalizePositionItem(item: Record<string, unknown>): Record<string, unknown> {
+function asString(value: unknown, fallback = ''): string {
+  const text = String(value ?? '').trim();
+  return text || fallback;
+}
+
+function normalizePositionItem(item: Record<string, unknown>): NormalizedPositionItem {
   const quantity = asNumber(item.quantity ?? item.qty ?? item.volume) ?? 0;
   const availableQty = asNumber(item.available_qty ?? item.availableQty ?? item.available ?? quantity) ?? quantity;
   const avgCost = asNumber(item.avg_cost ?? item.avgCost ?? item.cost_price ?? item.costPrice);
   const lastPrice = asNumber(item.last_price ?? item.lastPrice ?? item.price);
-  const marketValue = asNumber(item.market_value ?? item.marketValue);
+  const marketValue = asNumber(item.market_value ?? item.marketValue) ?? (
+    lastPrice != null && quantity > 0 ? Number((lastPrice * quantity).toFixed(4)) : null
+  );
+  const industryName = normalizeText(
+    item.industry
+    ?? item.industry_name
+    ?? item.industryName
+    ?? item.sector
+    ?? item.sector_name
+    ?? item.sectorName
+    ?? item.board_name
+    ?? item.boardName
+    ?? item.category
+    ?? item.category_name
+    ?? item.categoryName,
+  );
 
   return {
     ...item,
@@ -58,7 +97,154 @@ function normalizePositionItem(item: Record<string, unknown>): Record<string, un
     avg_cost: avgCost,
     last_price: lastPrice,
     market_value: marketValue,
+    industry_name: industryName,
   };
+}
+
+function pickFiniteNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const parsed = asNumber(value);
+    if (parsed != null) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function extractDateTimestamp(item: Record<string, unknown>): number {
+  for (const key of ['closed_at', 'closedAt', 'trade_date', 'tradeDate', 'submitted_at', 'submittedAt', 'created_at', 'createdAt', 'date']) {
+    const raw = item[key];
+    if (raw == null) {
+      continue;
+    }
+    const ts = new Date(String(raw)).getTime();
+    if (Number.isFinite(ts)) {
+      return ts;
+    }
+  }
+  return 0;
+}
+
+function normalizeTradeItem(item: Record<string, unknown>): Record<string, unknown> {
+  const quantity = Math.max(0, Math.floor(asNumber(item.quantity ?? item.qty ?? item.volume) ?? 0));
+  const entryPrice = asNumber(item.entry_price ?? item.entryPrice ?? item.avg_cost ?? item.avgCost ?? item.cost_price);
+  const exitPrice = asNumber(item.exit_price ?? item.exitPrice ?? item.price ?? item.last_price ?? item.lastPrice);
+  const realizedPnl = pickFiniteNumber(
+    item.realized_pnl,
+    item.realizedPnl,
+    item.pnl,
+    item.net_pnl,
+    item.netPnl,
+    item.profit,
+    item.gross_profit,
+    item.grossProfit,
+  );
+  const costBasis = pickFiniteNumber(
+    item.cost_basis,
+    item.costBasis,
+    item.turnover,
+    item.amount,
+    quantity > 0 && entryPrice != null ? quantity * entryPrice : null,
+  );
+  const returnPct = pickFiniteNumber(
+    item.return_pct,
+    item.returnPct,
+    item.net_return_pct,
+    item.netReturnPct,
+    item.profit_rate,
+    realizedPnl != null && costBasis != null && costBasis > 0 ? (realizedPnl / costBasis) * 100 : null,
+  );
+
+  return {
+    ...item,
+    code: String(item.code ?? item.stock_code ?? item.stockCode ?? item.symbol ?? '').trim(),
+    stock_name: normalizeText(item.stock_name ?? item.stockName ?? item.name),
+    quantity,
+    entry_price: entryPrice,
+    exit_price: exitPrice,
+    realized_pnl: realizedPnl,
+    return_pct: returnPct,
+    cost_basis: costBasis,
+    trade_timestamp: extractDateTimestamp(item),
+  };
+}
+
+function asNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const items: number[] = [];
+  for (const item of value) {
+    if (typeof item === 'number' && Number.isFinite(item)) {
+      items.push(item);
+      continue;
+    }
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const record = item as Record<string, unknown>;
+      const candidate = pickFiniteNumber(record.equity, record.value, record.total_asset, record.totalAsset, record.balance, record.nav);
+      if (candidate != null) {
+        items.push(candidate);
+      }
+    }
+  }
+  return items;
+}
+
+function deriveReturnsFromEquity(equityPoints: number[]): number[] {
+  if (equityPoints.length < 2) {
+    return [];
+  }
+  const returns: number[] = [];
+  for (let index = 1; index < equityPoints.length; index += 1) {
+    const prev = equityPoints[index - 1];
+    const next = equityPoints[index];
+    if (!Number.isFinite(prev) || !Number.isFinite(next) || prev <= 0) {
+      continue;
+    }
+    returns.push((next - prev) / prev);
+  }
+  return returns;
+}
+
+function computeMaxDrawdownPctFromEquity(equityPoints: number[]): number | null {
+  if (equityPoints.length < 2) {
+    return null;
+  }
+  let peak = 0;
+  let maxDrawdown = 0;
+  for (const point of equityPoints) {
+    if (!Number.isFinite(point) || point <= 0) {
+      continue;
+    }
+    if (point > peak) {
+      peak = point;
+      continue;
+    }
+    if (peak <= 0) {
+      continue;
+    }
+    const drawdown = ((peak - point) / peak) * 100;
+    if (drawdown > maxDrawdown) {
+      maxDrawdown = drawdown;
+    }
+  }
+  return maxDrawdown > 0 ? Number(maxDrawdown.toFixed(4)) : null;
+}
+
+function computeSharpeRatio(returns: number[], annualizationFactor = Math.sqrt(252)): number | null {
+  if (returns.length < 2) {
+    return null;
+  }
+  const mean = returns.reduce((sum, item) => sum + item, 0) / returns.length;
+  const variance = returns.reduce((sum, item) => sum + ((item - mean) ** 2), 0) / (returns.length - 1);
+  if (!Number.isFinite(variance) || variance <= 0) {
+    return null;
+  }
+  const std = Math.sqrt(variance);
+  if (std <= 0) {
+    return null;
+  }
+  return Number(((mean / std) * annualizationFactor).toFixed(4));
 }
 
 function extractItemDateText(item: Record<string, unknown>): string | null {
@@ -147,6 +333,14 @@ export interface TradingAccountStatePayload extends TradingRuntimeContextPayload
   trade_count: number;
   today_order_count: number;
   today_trade_count: number;
+}
+
+export interface TradingPortfolioHealthPayload extends TradingAccountStatePayload {
+  performance: Record<string, unknown>;
+  recent_trades: Array<Record<string, unknown>>;
+  metrics: Record<string, unknown>;
+  exposures: Record<string, unknown>;
+  diagnostics: Record<string, unknown>;
 }
 
 /** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
@@ -366,6 +560,397 @@ export class TradingAccountService {
       trade_count: snapshot.trades.length,
       today_order_count: countForDate(snapshot.orders),
       today_trade_count: countForDate(snapshot.trades),
+    };
+  }
+
+  private resolvePortfolioMetric(
+    summary: Record<string, unknown>,
+    performance: Record<string, unknown>,
+    ...keys: string[]
+  ): number | null {
+    const rawSummary = asRecord(performance.raw_summary);
+    for (const key of keys) {
+      const camelKey = key.replace(/_([a-z])/g, (_matched, letter: string) => letter.toUpperCase());
+      const value = pickFiniteNumber(
+        summary[key],
+        summary[camelKey],
+        performance[key],
+        performance[camelKey],
+        rawSummary[key],
+        rawSummary[camelKey],
+      );
+      if (value != null) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  private resolvePortfolioEquitySeries(
+    summary: Record<string, unknown>,
+    performance: Record<string, unknown>,
+    normalizedTrades: Array<Record<string, unknown>>,
+    initialCapital: number | null,
+    totalAsset: number | null,
+  ): number[] {
+    const rawSummary = asRecord(performance.raw_summary);
+    for (const key of ['equity_curve', 'equityCurve', 'equity_points', 'equityPoints', 'asset_curve', 'assetCurve', 'balance_history', 'balanceHistory']) {
+      const points = asNumberArray(performance[key] ?? rawSummary[key] ?? summary[key]);
+      if (points.length >= 2) {
+        return points;
+      }
+    }
+
+    const startingEquity = pickFiniteNumber(initialCapital, totalAsset);
+    if (startingEquity == null || startingEquity <= 0) {
+      return [];
+    }
+
+    const realizedSeries = normalizedTrades
+      .filter(item => pickFiniteNumber(item.realized_pnl) != null)
+      .sort((left, right) => Number(left.trade_timestamp ?? 0) - Number(right.trade_timestamp ?? 0));
+    if (realizedSeries.length < 2) {
+      return [];
+    }
+
+    let equity = startingEquity;
+    const points = [Number(equity.toFixed(4))];
+    for (const trade of realizedSeries) {
+      const pnl = pickFiniteNumber(trade.realized_pnl);
+      if (pnl == null) {
+        continue;
+      }
+      equity += pnl;
+      if (equity > 0) {
+        points.push(Number(equity.toFixed(4)));
+      }
+    }
+    return points;
+  }
+
+  private buildPortfolioDiagnostics(input: {
+    positionCount: number;
+    cashRatioPct: number | null;
+    top1WeightPct: number | null;
+    top3WeightPct: number | null;
+    topIndustry: Record<string, unknown> | null;
+    maxDrawdownPct: number | null;
+    sharpeRatio: number | null;
+    totalReturnPct: number | null;
+  }): Record<string, unknown> {
+    const alerts: Array<Record<string, unknown>> = [];
+    const suggestions: string[] = [];
+    let score = input.positionCount > 0 ? 100 : 78;
+
+    const pushAlert = (alert: Record<string, unknown>, scorePenalty: number, suggestion?: string) => {
+      alerts.push(alert);
+      score = Math.max(0, score - scorePenalty);
+      if (suggestion && !suggestions.includes(suggestion)) {
+        suggestions.push(suggestion);
+      }
+    };
+
+    if (input.positionCount === 0) {
+      alerts.push({
+        code: 'empty_portfolio',
+        level: 'info',
+        dimension: 'allocation',
+        message: '当前账户暂无持仓，本轮无法做持仓结构和行业暴露分析。',
+      });
+    }
+
+    if ((input.top1WeightPct ?? 0) >= 35) {
+      pushAlert(
+        {
+          code: 'single_stock_concentration',
+          level: (input.top1WeightPct ?? 0) >= 45 ? 'risk' : 'warning',
+          dimension: 'concentration',
+          message: `单只股票占总持仓约 ${Number(input.top1WeightPct ?? 0).toFixed(2)}%，集中度偏高。`,
+        },
+        (input.top1WeightPct ?? 0) >= 45 ? 24 : 14,
+        '优先降低单票集中度，尽量把单只股票权重控制在更可承受的区间内。',
+      );
+    }
+
+    if ((input.top3WeightPct ?? 0) >= 75) {
+      pushAlert(
+        {
+          code: 'top3_concentration',
+          level: 'warning',
+          dimension: 'concentration',
+          message: `前三大持仓合计约 ${Number(input.top3WeightPct ?? 0).toFixed(2)}%，组合分散度不足。`,
+        },
+        12,
+        '适当分散前三大持仓，避免组合收益过度绑定少数标的。',
+      );
+    }
+
+    const topIndustryWeightPct = pickFiniteNumber(input.topIndustry?.weight_pct, input.topIndustry?.invested_weight_pct);
+    const topIndustryName = normalizeText(input.topIndustry?.industry_name ?? input.topIndustry?.name ?? input.topIndustry?.label);
+    if (topIndustryName && topIndustryName !== '未分类' && (topIndustryWeightPct ?? 0) >= 45) {
+      pushAlert(
+        {
+          code: 'industry_overweight',
+          level: 'warning',
+          dimension: 'industry',
+          message: `${topIndustryName} 行业占当前持仓约 ${Number(topIndustryWeightPct ?? 0).toFixed(2)}%，需要关注行业过度集中。`,
+        },
+        14,
+        `考虑降低 ${topIndustryName} 行业暴露，或通过增加非相关行业仓位做再平衡。`,
+      );
+    }
+
+    if ((input.cashRatioPct ?? 0) < 5 && input.positionCount > 0) {
+      pushAlert(
+        {
+          code: 'low_cash_buffer',
+          level: 'warning',
+          dimension: 'liquidity',
+          message: `现金占总资产约 ${Number(input.cashRatioPct ?? 0).toFixed(2)}%，缓冲偏低。`,
+        },
+        8,
+        '为组合预留一部分现金缓冲，避免回撤时被动应对。',
+      );
+    }
+
+    if ((input.maxDrawdownPct ?? 0) >= 15) {
+      pushAlert(
+        {
+          code: 'drawdown_high',
+          level: 'risk',
+          dimension: 'drawdown',
+          message: `历史最大回撤约 ${Number(input.maxDrawdownPct ?? 0).toFixed(2)}%，风险承受压力较大。`,
+        },
+        18,
+        '先压缩高波动仓位，并检查止损与仓位控制是否执行到位。',
+      );
+    }
+
+    if (input.sharpeRatio != null && input.sharpeRatio < 0.3) {
+      pushAlert(
+        {
+          code: 'sharpe_weak',
+          level: 'warning',
+          dimension: 'efficiency',
+          message: `当前夏普比率约 ${input.sharpeRatio.toFixed(2)}，风险调整后收益偏弱。`,
+        },
+        8,
+        '优先保留收益质量更稳定的仓位，减少低效率暴露。',
+      );
+    }
+
+    if ((input.totalReturnPct ?? 0) <= -8) {
+      pushAlert(
+        {
+          code: 'return_underwater',
+          level: 'warning',
+          dimension: 'performance',
+          message: `当前累计收益率约 ${Number(input.totalReturnPct ?? 0).toFixed(2)}%，组合仍处于较明显回撤区。`,
+        },
+        10,
+        '在回撤修复前，优先控制仓位风险，避免继续放大亏损敞口。',
+      );
+    }
+
+    const healthLevel = score >= 80 ? 'healthy' : score >= 60 ? 'watch' : 'risky';
+    if (!suggestions.length && input.positionCount > 0) {
+      suggestions.push('当前组合结构相对平稳，继续跟踪单票仓位上限和现金缓冲即可。');
+    }
+
+    return {
+      health_score: score,
+      health_level: healthLevel,
+      rebalancing_needed: alerts.some(item => String(item.code ?? '').includes('concentration') || item.code === 'industry_overweight'),
+      alerts,
+      suggestions,
+    };
+  }
+
+  async getPortfolioHealth(userId: number, refresh = false): Promise<TradingPortfolioHealthPayload> {
+    const snapshot = await this.resolveSnapshot(userId, { refresh });
+    const summary = asRecord(snapshot.summary);
+    const performance = asRecord(snapshot.performance);
+    const snapshotDate = String(snapshot.snapshot_at ?? '').slice(0, 10);
+    const countForDate = (items: Array<Record<string, unknown>>): number =>
+      items.reduce((total, item) => (extractItemDateText(item) === snapshotDate ? total + 1 : total), 0);
+    const totalAsset = pickFiniteNumber(
+      summary.total_asset,
+      summary.totalAsset,
+      summary.total_equity,
+      performance.total_asset,
+      performance.totalAsset,
+      performance.total_equity,
+    ) ?? 0;
+    const totalMarketValue = pickFiniteNumber(
+      summary.market_value,
+      summary.marketValue,
+      summary.total_market_value,
+      performance.market_value,
+      performance.marketValue,
+      performance.total_market_value,
+    ) ?? 0;
+    const availableCash = pickFiniteNumber(
+      summary.cash,
+      summary.available_cash,
+      summary.availableCash,
+      performance.cash,
+      performance.available_cash,
+      performance.availableCash,
+    );
+    const initialCapital = pickFiniteNumber(
+      summary.initial_capital,
+      summary.initialCapital,
+      summary.initial_cash,
+      summary.initialCash,
+      performance.initial_capital,
+      performance.initialCapital,
+    );
+
+    const positions: PortfolioHealthPositionItem[] = snapshot.positions
+      .map(normalizePositionItem)
+      .map((item) => {
+        const marketValue = pickFiniteNumber(item.market_value) ?? 0;
+        const avgCost = pickFiniteNumber(item.avg_cost);
+        const quantity = Math.max(0, Math.floor(pickFiniteNumber(item.quantity) ?? 0));
+        const costBasis = avgCost != null && quantity > 0 ? Number((avgCost * quantity).toFixed(4)) : null;
+        const unrealizedPnl = costBasis != null ? Number((marketValue - costBasis).toFixed(4)) : null;
+        const unrealizedReturnPct = unrealizedPnl != null && costBasis != null && costBasis > 0
+          ? Number(((unrealizedPnl / costBasis) * 100).toFixed(4))
+          : null;
+        const assetWeightPct = totalAsset > 0 ? Number(((marketValue / totalAsset) * 100).toFixed(4)) : null;
+        const investedWeightPct = totalMarketValue > 0 ? Number(((marketValue / totalMarketValue) * 100).toFixed(4)) : null;
+        return {
+          ...item,
+          cost_basis: costBasis,
+          unrealized_pnl: unrealizedPnl,
+          unrealized_return_pct: unrealizedReturnPct,
+          weight_pct: assetWeightPct,
+          invested_weight_pct: investedWeightPct,
+        };
+      })
+      .sort((left, right) => (pickFiniteNumber(right.market_value) ?? 0) - (pickFiniteNumber(left.market_value) ?? 0));
+
+    const normalizedTrades = snapshot.trades
+      .map((item) => normalizeTradeItem(asRecord(item)))
+      .sort((left, right) => Number(left.trade_timestamp ?? 0) - Number(right.trade_timestamp ?? 0));
+
+    const tradeReturns = normalizedTrades
+      .map(item => pickFiniteNumber(item.return_pct))
+      .filter((item): item is number => item != null)
+      .map(item => item / 100);
+    const winningTrades = normalizedTrades.filter(item => (pickFiniteNumber(item.realized_pnl) ?? 0) > 0).length;
+    const closedTrades = normalizedTrades.filter(item => pickFiniteNumber(item.realized_pnl) != null).length;
+    const winRatePct = closedTrades > 0 ? Number(((winningTrades / closedTrades) * 100).toFixed(4)) : null;
+
+    const rawIndustryGroups = new Map<string, { industry_name: string; market_value: number; codes: Set<string>; count: number }>();
+    for (const position of positions) {
+      const industryName = normalizeText(position.industry_name, 64) ?? '未分类';
+      const current = rawIndustryGroups.get(industryName) ?? {
+        industry_name: industryName,
+        market_value: 0,
+        codes: new Set<string>(),
+        count: 0,
+      };
+      current.market_value += pickFiniteNumber(position.market_value) ?? 0;
+      current.count += 1;
+      const code = asString(position.code);
+      if (code) {
+        current.codes.add(code);
+      }
+      rawIndustryGroups.set(industryName, current);
+    }
+
+    const industryExposure = [...rawIndustryGroups.values()]
+      .map(item => ({
+        industry_name: item.industry_name,
+        market_value: Number(item.market_value.toFixed(4)),
+        weight_pct: totalAsset > 0 ? Number(((item.market_value / totalAsset) * 100).toFixed(4)) : null,
+        invested_weight_pct: totalMarketValue > 0 ? Number(((item.market_value / totalMarketValue) * 100).toFixed(4)) : null,
+        stock_count: item.count,
+        codes: [...item.codes],
+      }))
+      .sort((left, right) => (pickFiniteNumber(right.market_value) ?? 0) - (pickFiniteNumber(left.market_value) ?? 0));
+
+    const equityPoints = this.resolvePortfolioEquitySeries(summary, performance, normalizedTrades, initialCapital, totalAsset);
+    const equityReturns = deriveReturnsFromEquity(equityPoints);
+    const totalReturnPct = this.resolvePortfolioMetric(summary, performance, 'total_return_pct', 'return_pct', 'profit_rate')
+      ?? (initialCapital != null && initialCapital > 0 && totalAsset > 0
+        ? Number((((totalAsset - initialCapital) / initialCapital) * 100).toFixed(4))
+        : null);
+    const totalPnl = this.resolvePortfolioMetric(summary, performance, 'pnl_total', 'total_pnl', 'profit_total');
+    const dailyPnl = this.resolvePortfolioMetric(summary, performance, 'pnl_daily', 'daily_pnl', 'today_pnl');
+    const maxDrawdownPct = this.resolvePortfolioMetric(summary, performance, 'max_drawdown_pct', 'drawdown_pct')
+      ?? computeMaxDrawdownPctFromEquity(equityPoints);
+    const sharpeRatio = this.resolvePortfolioMetric(summary, performance, 'sharpe_ratio')
+      ?? computeSharpeRatio(equityReturns.length >= 2 ? equityReturns : tradeReturns, equityReturns.length >= 2 ? Math.sqrt(252) : Math.sqrt(Math.max(tradeReturns.length, 1)));
+    const unrealizedPnl = Number(
+      positions.reduce((sum, item) => sum + (pickFiniteNumber(item.unrealized_pnl) ?? 0), 0).toFixed(4),
+    );
+    const realizedPnl = totalPnl != null ? Number((totalPnl - unrealizedPnl).toFixed(4)) : null;
+    const cashRatioPct = totalAsset > 0 && availableCash != null ? Number(((availableCash / totalAsset) * 100).toFixed(4)) : null;
+    const investedRatioPct = totalAsset > 0 ? Number(((totalMarketValue / totalAsset) * 100).toFixed(4)) : null;
+    const top1WeightPct = pickFiniteNumber(positions[0]?.invested_weight_pct);
+    const top3MarketValue = positions
+      .slice(0, 3)
+      .reduce((sum, item) => sum + (pickFiniteNumber(item.market_value) ?? 0), 0);
+    const top3WeightPct = totalMarketValue > 0 ? Number(((top3MarketValue / totalMarketValue) * 100).toFixed(4)) : null;
+    const diagnostics = this.buildPortfolioDiagnostics({
+      positionCount: positions.length,
+      cashRatioPct,
+      top1WeightPct,
+      top3WeightPct,
+      topIndustry: industryExposure[0] ?? null,
+      maxDrawdownPct,
+      sharpeRatio,
+      totalReturnPct,
+    });
+
+    return {
+      broker_account_id: snapshot.account.broker_account_id,
+      broker_code: snapshot.account.broker_code,
+      provider_code: snapshot.account.provider_code,
+      provider_name: snapshot.account.provider_name,
+      account_uid: snapshot.account.account_uid,
+      account_display_name: snapshot.account.account_display_name,
+      snapshot_at: snapshot.snapshot_at,
+      data_source: snapshot.data_source,
+      summary,
+      positions,
+      available_cash: availableCash,
+      total_market_value: totalMarketValue,
+      total_asset: totalAsset,
+      order_count: snapshot.orders.length,
+      trade_count: snapshot.trades.length,
+      today_order_count: countForDate(snapshot.orders),
+      today_trade_count: countForDate(snapshot.trades),
+      performance,
+      recent_trades: normalizedTrades.slice(-10).reverse(),
+      metrics: {
+        total_return_pct: totalReturnPct,
+        total_pnl: totalPnl,
+        daily_pnl: dailyPnl,
+        realized_pnl: realizedPnl,
+        unrealized_pnl: unrealizedPnl,
+        max_drawdown_pct: maxDrawdownPct,
+        sharpe_ratio: sharpeRatio,
+        win_rate_pct: winRatePct,
+        cash_ratio_pct: cashRatioPct,
+        invested_ratio_pct: investedRatioPct,
+        top1_position_pct: top1WeightPct,
+        top3_position_pct: top3WeightPct,
+        position_count: positions.length,
+      },
+      exposures: {
+        by_industry: industryExposure,
+        by_stock: positions.slice(0, 5).map(item => ({
+          code: item.code,
+          stock_name: item.stock_name,
+          market_value: item.market_value,
+          weight_pct: item.weight_pct,
+          invested_weight_pct: item.invested_weight_pct,
+        })),
+      },
+      diagnostics,
     };
   }
 
