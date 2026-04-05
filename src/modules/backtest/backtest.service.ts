@@ -20,8 +20,10 @@ import {
   resolveLegacyBacktestStrategy,
 } from './backtest-strategy-strategies';
 import {
+  BacktestStrategyTemplateCode,
   getBacktestStrategyTemplateName,
   isBacktestStrategyTemplateCode,
+  normalizeBacktestStrategyParams,
 } from './backtest-strategy-templates';
 import { UserBacktestStrategyService } from './user-backtest-strategy.service';
 
@@ -276,6 +278,56 @@ export class BacktestService {
   private normalizeSavedStrategyName(value: unknown): string | null {
     const text = String(value ?? '').trim();
     return text.length > 0 ? text.slice(0, 64) : null;
+  }
+
+  private normalizeInlineRunStrategies(
+    values: Array<Record<string, unknown>>,
+  ): Array<{
+    strategyId: number | null;
+    strategyName: string;
+    templateCode: BacktestStrategyTemplateCode;
+    templateName: string;
+    params: Record<string, unknown>;
+  }> {
+    const normalized: Array<{
+      strategyId: number | null;
+      strategyName: string;
+      templateCode: BacktestStrategyTemplateCode;
+      templateName: string;
+      params: Record<string, unknown>;
+    }> = [];
+    const seen = new Set<string>();
+
+    for (const item of values) {
+      const templateCodeRaw = String(item.template_code ?? item.templateCode ?? '').trim();
+      if (!isBacktestStrategyTemplateCode(templateCodeRaw)) {
+        throw buildServiceError('VALIDATION_ERROR', `unsupported template_code: ${templateCodeRaw || '--'}`);
+      }
+      const strategyName = this.normalizeSavedStrategyName(item.strategy_name ?? item.strategyName)
+        ?? getBacktestStrategyTemplateName(templateCodeRaw);
+      const strategyId = this.normalizeSavedStrategyId(item.strategy_id ?? item.strategyId);
+      const { params, issues } = normalizeBacktestStrategyParams(templateCodeRaw, item.params);
+      if (issues.length > 0) {
+        throw buildServiceError('VALIDATION_ERROR', issues.join('; '));
+      }
+      const dedupeKey = `${strategyId ?? 'adhoc'}::${templateCodeRaw}::${strategyName}::${safeJsonStringify(params)}`;
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
+      normalized.push({
+        strategyId,
+        strategyName,
+        templateCode: templateCodeRaw,
+        templateName: getBacktestStrategyTemplateName(templateCodeRaw),
+        params,
+      });
+    }
+
+    if (normalized.length === 0) {
+      throw buildServiceError('VALIDATION_ERROR', '至少需要一条有效策略定义');
+    }
+    return normalized;
   }
 
   private resolveStoredStrategyMetadata(
@@ -1383,6 +1435,7 @@ export class BacktestService {
     endDate: string;
     strategyIds?: number[];
     strategyCodes?: string[];
+    strategies?: Array<Record<string, unknown>>;
     initialCapital?: number;
     commissionRate?: number;
     slippageBps?: number;
@@ -1403,11 +1456,13 @@ export class BacktestService {
       throw buildServiceError('VALIDATION_ERROR', 'start_date must be <= end_date');
     }
 
-    const resolvedStrategies = await this.userBacktestStrategyService.resolveRunStrategies({
-      userId: input.requester.userId,
-      strategyIds: input.strategyIds,
-      strategyCodes: input.strategyCodes,
-    });
+    const resolvedStrategies = Array.isArray(input.strategies) && input.strategies.length > 0
+      ? this.normalizeInlineRunStrategies(input.strategies.map(item => asRecord(item)))
+      : await this.userBacktestStrategyService.resolveRunStrategies({
+        userId: input.requester.userId,
+        strategyIds: input.strategyIds,
+        strategyCodes: input.strategyCodes,
+      });
     const initialCapital = this.toNumber(input.initialCapital);
     const commissionRate = this.toNumber(input.commissionRate);
     const slippageBps = this.toNumber(input.slippageBps);

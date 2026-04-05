@@ -217,6 +217,84 @@ describe('AgentChatService', () => {
     }));
   });
 
+  it('runs ad-hoc strategy backtest for agent chat with inline template params', async () => {
+    const runStrategyRange = jest.fn(async payload => ({
+      run_group_id: 901,
+      code: payload.code,
+      requested_range: {
+        start_date: payload.startDate,
+        end_date: payload.endDate,
+      },
+      effective_range: {
+        start_date: payload.startDate,
+        end_date: payload.endDate,
+      },
+      items: [
+        {
+          run_id: 101,
+          strategy_code: 'macd_cross',
+          strategy_name: 'MACD 金叉',
+          template_code: 'macd_cross',
+          metrics: {
+            total_return_pct: 18.6,
+          },
+        },
+      ],
+    }));
+    const service = new AgentChatService(
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      { runStrategyRange } as any,
+    );
+
+    const payload = await service.runStrategyBacktestForAgent(7, {
+      code: '600519',
+      startDate: '2025-04-05',
+      endDate: '2026-04-05',
+      strategies: [
+        {
+          strategy_name: 'MACD 金叉',
+          template_code: 'macd_cross',
+          params: {
+            macdFast: 12,
+            macdSlow: 26,
+            macdSignal: 9,
+          },
+        },
+      ],
+      initialCapital: 100000,
+    });
+
+    expect(payload).toEqual(expect.objectContaining({
+      code: '600519',
+      run_group_id: 901,
+    }));
+    expect(runStrategyRange).toHaveBeenCalledWith(expect.objectContaining({
+      code: '600519',
+      startDate: '2025-04-05',
+      endDate: '2026-04-05',
+      strategies: [
+        {
+          strategy_name: 'MACD 金叉',
+          template_code: 'macd_cross',
+          params: {
+            macdFast: 12,
+            macdSlow: 26,
+            macdSignal: 9,
+          },
+        },
+      ],
+      initialCapital: 100000,
+      requester: {
+        userId: 7,
+        includeAll: false,
+      },
+    }));
+  });
+
   it('mirrors agent analysis results into analysis history rows', async () => {
     const create = jest.fn(async ({ data }) => data);
     const findFirst = jest.fn(async () => null);

@@ -3,6 +3,7 @@
 import { Module } from '@nestjs/common';
 
 import { AnalysisModule } from '@/modules/analysis/analysis.module';
+import { BacktestModule } from '@/modules/backtest/backtest.module';
 import { BrokerAccountsModule } from '@/modules/broker-accounts/broker-accounts.module';
 import { TradingAccountModule } from '@/modules/trading-account/trading-account.module';
 
@@ -11,7 +12,7 @@ import { AgentChatInternalController } from './agent-chat.internal.controller';
 import { AgentChatService } from './agent-chat.service';
 
 @Module({
-  imports: [AnalysisModule, BrokerAccountsModule, TradingAccountModule],
+  imports: [AnalysisModule, BacktestModule, BrokerAccountsModule, TradingAccountModule],
   controllers: [AgentChatController, AgentChatInternalController],
   providers: [AgentChatService],
   exports: [AgentChatService],

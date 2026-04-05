@@ -1,6 +1,6 @@
 /** 回测模块中的实现文件，承载该领域的具体逻辑。 */
 
-export const BACKTEST_STRATEGY_TEMPLATE_CODES = ['ma_cross', 'rsi_threshold'] as const;
+export const BACKTEST_STRATEGY_TEMPLATE_CODES = ['ma_cross', 'rsi_threshold', 'macd_cross', 'rule_dsl'] as const;
 
 export type BacktestStrategyTemplateCode = (typeof BACKTEST_STRATEGY_TEMPLATE_CODES)[number];
 
@@ -19,6 +19,7 @@ export interface BacktestStrategyTemplateDefinition {
   templateName: string;
   description: string;
   params: BacktestStrategyTemplateParamDefinition[];
+  publicVisible?: boolean;
 }
 
 const TEMPLATE_DEFINITIONS: Record<BacktestStrategyTemplateCode, BacktestStrategyTemplateDefinition> = {
@@ -72,6 +73,47 @@ const TEMPLATE_DEFINITIONS: Record<BacktestStrategyTemplateCode, BacktestStrateg
       },
     ],
   },
+  macd_cross: {
+    templateCode: 'macd_cross',
+    templateName: 'MACD 金叉',
+    description: 'MACD 金叉时买入，死叉时卖出。',
+    params: [
+      {
+        key: 'macdFast',
+        label: '快线周期',
+        description: 'MACD 快线 EMA 周期。',
+        min: 5,
+        max: 60,
+        step: 1,
+        defaultValue: 12,
+      },
+      {
+        key: 'macdSlow',
+        label: '慢线周期',
+        description: 'MACD 慢线 EMA 周期。',
+        min: 10,
+        max: 120,
+        step: 1,
+        defaultValue: 26,
+      },
+      {
+        key: 'macdSignal',
+        label: '信号线周期',
+        description: 'MACD DEA 信号线周期。',
+        min: 3,
+        max: 30,
+        step: 1,
+        defaultValue: 9,
+      },
+    ],
+  },
+  rule_dsl: {
+    templateCode: 'rule_dsl',
+    templateName: '组合规则 DSL',
+    description: '由 Agent 从自然语言解析出的组合规则，例如“MACD 金叉且 RSI<30，跌破 5 日线止损”。',
+    params: [],
+    publicVisible: false,
+  },
 };
 
 export function isBacktestStrategyTemplateCode(value: string): value is BacktestStrategyTemplateCode {
@@ -85,7 +127,9 @@ export function getBacktestStrategyTemplateDefinition(
 }
 
 export function listBacktestStrategyTemplateDefinitions(): BacktestStrategyTemplateDefinition[] {
-  return BACKTEST_STRATEGY_TEMPLATE_CODES.map((templateCode) => TEMPLATE_DEFINITIONS[templateCode]);
+  return BACKTEST_STRATEGY_TEMPLATE_CODES
+    .map((templateCode) => TEMPLATE_DEFINITIONS[templateCode])
+    .filter((definition) => definition.publicVisible !== false);
 }
 
 export function getBacktestStrategyTemplateName(templateCode: string): string {
@@ -112,13 +156,31 @@ function toFiniteNumber(value: unknown): number | null {
 export function normalizeBacktestStrategyParams(
   templateCode: BacktestStrategyTemplateCode,
   rawParams: unknown,
-): { params: Record<string, number>; issues: string[] } {
+): { params: Record<string, unknown>; issues: string[] } {
+  if (templateCode === 'rule_dsl') {
+    const source = rawParams && typeof rawParams === 'object' && !Array.isArray(rawParams)
+      ? rawParams as Record<string, unknown>
+      : {};
+    const entry = source.entry;
+    const conditions = entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? (entry as Record<string, unknown>).conditions
+      : undefined;
+    const issues: string[] = [];
+    if (!Array.isArray(conditions) || conditions.length === 0) {
+      issues.push('组合规则 DSL 至少需要一条入场条件');
+    }
+    return {
+      params: JSON.parse(JSON.stringify(source)),
+      issues,
+    };
+  }
+
   const definition = TEMPLATE_DEFINITIONS[templateCode];
   const source = rawParams && typeof rawParams === 'object' && !Array.isArray(rawParams)
     ? rawParams as Record<string, unknown>
     : {};
 
-  const params: Record<string, number> = {};
+  const params: Record<string, unknown> = {};
   const issues: string[] = [];
 
   for (const field of definition.params) {
@@ -133,10 +195,18 @@ export function normalizeBacktestStrategyParams(
   }
 
   if (templateCode === 'rsi_threshold') {
-    const oversold = params.oversoldThreshold;
-    const overbought = params.overboughtThreshold;
+    const oversold = Number(params.oversoldThreshold);
+    const overbought = Number(params.overboughtThreshold);
     if (oversold >= overbought) {
       issues.push('超卖阈值必须小于超买阈值');
+    }
+  }
+
+  if (templateCode === 'macd_cross') {
+    const fast = Number(params.macdFast);
+    const slow = Number(params.macdSlow);
+    if (fast >= slow) {
+      issues.push('MACD 快线周期必须小于慢线周期');
     }
   }
 

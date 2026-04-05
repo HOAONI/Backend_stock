@@ -10,6 +10,7 @@ import {
   AgentChatInternalPortfolioHealthDto,
   AgentChatInternalRuntimeContextDto,
   AgentChatInternalSaveAnalysisDto,
+  AgentChatInternalStrategyBacktestDto,
   AgentChatInternalUserPreferencesDto,
 } from './agent-chat.dto';
 import { AgentChatService } from './agent-chat.service';
@@ -147,6 +148,32 @@ export class AgentChatInternalController {
     requireInternalToken(authorization);
     try {
       return await this.agentChatService.getBacktestSummaryForAgent(body.owner_user_id, body.stock_codes ?? [], body.limit);
+    } catch (error: unknown) {
+      throw toHttpException(error);
+    }
+  }
+
+  @Post('/strategy-backtest')
+  async strategyBacktest(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: AgentChatInternalStrategyBacktestDto,
+  ): Promise<Record<string, unknown>> {
+    requireInternalToken(authorization);
+    try {
+      return await this.agentChatService.runStrategyBacktestForAgent(body.owner_user_id, {
+        code: body.code,
+        startDate: body.start_date,
+        endDate: body.end_date,
+        strategies: Array.isArray(body.strategies) ? body.strategies.map(item => ({
+          strategy_id: item.strategy_id,
+          strategy_name: item.strategy_name,
+          template_code: item.template_code,
+          params: item.params ?? {},
+        })) : [],
+        initialCapital: body.initial_capital,
+        commissionRate: body.commission_rate,
+        slippageBps: body.slippage_bps,
+      });
     } catch (error: unknown) {
       throw toHttpException(error);
     }

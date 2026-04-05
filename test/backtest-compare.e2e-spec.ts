@@ -562,6 +562,162 @@ describe('Backtest compare validation and forwarding', () => {
         ],
       });
     });
+
+    it('forwards inline rule_dsl strategies without flattening nested params', async () => {
+      const createGroup = jest.fn(async () => ({ id: 1002 }));
+      const createRun = jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: 2002,
+        ...data,
+      }));
+      const tx = {
+        strategyBacktestRunGroup: { create: createGroup },
+        strategyBacktestRun: { create: createRun },
+        strategyBacktestTrade: { createMany: jest.fn(async () => ({})) },
+        strategyBacktestEquityPoint: { createMany: jest.fn(async () => ({})) },
+      };
+      const findFirst = jest.fn(async () => ({
+        id: 1002,
+        code: '600519',
+        engineVersion: 'backtrader_v1',
+        aiInterpretationStatus: 'pending',
+        aiInterpretationErrorMessage: null,
+        aiInterpretationCompletedAt: null,
+        startDate: new Date('2024-01-01T00:00:00Z'),
+        endDate: new Date('2024-12-31T00:00:00Z'),
+        effectiveStartDate: new Date('2024-01-02T00:00:00Z'),
+        effectiveEndDate: new Date('2024-12-31T00:00:00Z'),
+        createdAt: new Date('2026-03-05T00:00:00Z'),
+        runs: [
+          {
+            id: 2002,
+            savedStrategyId: null,
+            savedStrategyName: 'MACD+RSI 组合止损',
+            strategyCode: 'rule_dsl',
+            strategyVersion: 'v1',
+            paramsJson: {
+              entry: {
+                operator: 'and',
+                conditions: [
+                  { kind: 'macd_cross', direction: 'bullish', fast: 12, slow: 26, signal: 9 },
+                  { kind: 'rsi_threshold', period: 14, operator: 'lt', threshold: 30 },
+                ],
+              },
+              exit: {
+                operator: 'or',
+                conditions: [
+                  { kind: 'price_ma_relation', maWindow: 5, relation: 'cross_below' },
+                ],
+              },
+            },
+            metricsJson: { total_return_pct: 11.6 },
+            benchmarkJson: { total_return_pct: 8.1 },
+            trades: [],
+            equityPoints: [],
+          },
+        ],
+      }));
+
+      const strategyRun = jest.fn(async (_payload: Record<string, unknown>) => ({
+        engine_version: 'backtrader_v1',
+        requested_range: { start_date: '2024-01-01', end_date: '2024-12-31' },
+        effective_range: { start_date: '2024-01-02', end_date: '2024-12-31' },
+        items: [
+          {
+            strategy_id: null,
+            strategy_name: 'MACD+RSI 组合止损',
+            strategy_code: 'rule_dsl',
+            template_code: 'rule_dsl',
+            template_name: '组合规则 DSL',
+            strategy_version: 'v1',
+            params: {
+              entry: {
+                operator: 'and',
+                conditions: [
+                  { kind: 'macd_cross', direction: 'bullish', fast: 12, slow: 26, signal: 9 },
+                  { kind: 'rsi_threshold', period: 14, operator: 'lt', threshold: 30 },
+                ],
+              },
+              exit: {
+                operator: 'or',
+                conditions: [
+                  { kind: 'price_ma_relation', maWindow: 5, relation: 'cross_below' },
+                ],
+              },
+            },
+            metrics: { total_return_pct: 11.6 },
+            benchmark: { total_return_pct: 8.1 },
+            trades: [],
+            equity: [],
+          },
+        ],
+      }));
+
+      const service = new BacktestService(
+        {
+          $transaction: jest.fn(async (callback: (trx: any) => Promise<number>) => callback(tx)),
+          strategyBacktestRunGroup: { findFirst },
+        } as any,
+        { strategyRun } as any,
+        {} as any,
+      );
+
+      await service.runStrategyRange({
+        code: '600519',
+        startDate: '2024-01-01',
+        endDate: '2024-12-31',
+        strategies: [
+          {
+            strategy_name: 'MACD+RSI 组合止损',
+            template_code: 'rule_dsl',
+            params: {
+              entry: {
+                operator: 'and',
+                conditions: [
+                  { kind: 'macd_cross', direction: 'bullish', fast: 12, slow: 26, signal: 9 },
+                  { kind: 'rsi_threshold', period: 14, operator: 'lt', threshold: 30 },
+                ],
+              },
+              exit: {
+                operator: 'or',
+                conditions: [
+                  { kind: 'price_ma_relation', maWindow: 5, relation: 'cross_below' },
+                ],
+              },
+            },
+          },
+        ],
+        requester: { userId: 9, includeAll: false },
+      });
+
+      expect(strategyRun).toHaveBeenCalledTimes(1);
+      expect(strategyRun.mock.calls[0]?.[0]).toMatchObject({
+        code: '600519',
+        strategies: [
+          {
+            strategy_name: 'MACD+RSI 组合止损',
+            template_code: 'rule_dsl',
+            params: {
+              entry: {
+                operator: 'and',
+              },
+              exit: {
+                operator: 'or',
+              },
+            },
+          },
+        ],
+      });
+      expect(createRun).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          savedStrategyName: 'MACD+RSI 组合止损',
+          strategyCode: 'rule_dsl',
+          paramsJson: expect.objectContaining({
+            entry: expect.any(Object),
+            exit: expect.any(Object),
+          }),
+        }),
+      });
+    });
   });
 
   describe('UserBacktestStrategyService', () => {

@@ -10,6 +10,7 @@ import { PrismaService } from '@/common/database/prisma.service';
 import { safeJsonStringify } from '@/common/utils/json';
 import { evaluateTradingSessionGuardFromEnv, TradingSessionGuardResult } from '@/common/utils/trading-session';
 import { AnalysisService } from '@/modules/analysis/analysis.service';
+import { BacktestService } from '@/modules/backtest/backtest.service';
 import { BrokerAccountsService } from '@/modules/broker-accounts/broker-accounts.service';
 import { TradingAccountService } from '@/modules/trading-account/trading-account.service';
 import { normalizeAgentChatPreferences } from '@/modules/user-settings/agent-chat-preferences';
@@ -103,6 +104,7 @@ export class AgentChatService {
     private readonly analysisService: AnalysisService,
     private readonly brokerAccountsService: BrokerAccountsService,
     private readonly tradingAccountService: TradingAccountService,
+    private readonly backtestService: BacktestService = {} as BacktestService,
   ) {}
 
   private buildOwnerWhere(ownerUserId: number): { ownerUserId: number } {
@@ -671,6 +673,30 @@ export class AgentChatService {
       total: items.length,
       items,
     };
+  }
+
+  async runStrategyBacktestForAgent(
+    ownerUserId: number,
+    input: {
+      code: string;
+      startDate: string;
+      endDate: string;
+      strategies?: Array<Record<string, unknown>>;
+      initialCapital?: number;
+      commissionRate?: number;
+      slippageBps?: number;
+    },
+  ): Promise<Record<string, unknown>> {
+    return await this.backtestService.runStrategyRange({
+      code: input.code,
+      startDate: input.startDate,
+      endDate: input.endDate,
+      strategies: Array.isArray(input.strategies) ? input.strategies : [],
+      initialCapital: input.initialCapital,
+      commissionRate: input.commissionRate,
+      slippageBps: input.slippageBps,
+      requester: { userId: ownerUserId, includeAll: false },
+    });
   }
 
   private normalizeOrderStatus(payload: Record<string, unknown>): string {

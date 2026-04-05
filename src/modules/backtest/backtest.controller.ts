@@ -155,7 +155,7 @@ export class BacktestStrategyCreateDto {
   description?: string;
 
   @IsString()
-  @IsIn(['ma_cross', 'rsi_threshold'])
+  @IsIn(['ma_cross', 'rsi_threshold', 'macd_cross'])
   template_code!: string;
 
   @IsObject()
@@ -173,7 +173,7 @@ export class BacktestStrategyUpdateDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['ma_cross', 'rsi_threshold'])
+  @IsIn(['ma_cross', 'rsi_threshold', 'macd_cross'])
   template_code?: string;
 
   @IsOptional()

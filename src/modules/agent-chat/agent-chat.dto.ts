@@ -4,11 +4,13 @@ import { Type } from 'class-transformer';
 import {
   IsArray,
   IsInt,
+  IsNumber,
   IsObject,
   IsOptional,
   IsString,
   Max,
   Min,
+  ValidateNested,
 } from 'class-validator';
 
 export class AgentChatRequestDto {
@@ -119,6 +121,66 @@ export class AgentChatInternalBacktestDto {
   @Min(1)
   @Max(20)
   limit = 6;
+}
+
+export class AgentChatInternalStrategyDefinitionDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  strategy_id?: number;
+
+  @IsString()
+  strategy_name!: string;
+
+  @IsString()
+  template_code!: string;
+
+  @IsOptional()
+  @IsObject()
+  params?: Record<string, unknown>;
+}
+
+export class AgentChatInternalStrategyBacktestDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  owner_user_id!: number;
+
+  @IsString()
+  code!: string;
+
+  @IsString()
+  start_date!: string;
+
+  @IsString()
+  end_date!: string;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => AgentChatInternalStrategyDefinitionDto)
+  strategies?: AgentChatInternalStrategyDefinitionDto[];
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  initial_capital?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  commission_rate?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(1000)
+  slippage_bps?: number;
 }
 
 export class AgentChatInternalPlaceOrderDto {

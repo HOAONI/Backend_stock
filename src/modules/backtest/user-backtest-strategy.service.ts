@@ -28,7 +28,7 @@ export interface ResolvedUserBacktestStrategy {
   strategyName: string;
   templateCode: BacktestStrategyTemplateCode;
   templateName: string;
-  params: Record<string, number>;
+  params: Record<string, unknown>;
 }
 
 function buildError(code: string, message: string): ServiceError {
@@ -221,7 +221,7 @@ export class UserBacktestStrategyService {
     name: string;
     description: string | null;
     templateCode: BacktestStrategyTemplateCode;
-    params: Record<string, number>;
+    params: Record<string, unknown>;
   } {
     const name = String(input.name ?? '').trim();
     if (!name || name.length > 64) {
