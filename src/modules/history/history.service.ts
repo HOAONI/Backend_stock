@@ -113,6 +113,7 @@ export class HistoryService {
     queryId: string | null;
     code: string;
     name: string | null;
+    recordSource: string;
     reportType: string | null;
     sentimentScore: number | null;
     operationAdvice: string | null;
@@ -123,6 +124,7 @@ export class HistoryService {
       task_id: row.queryId ?? null,
       stock_code: row.code,
       stock_name: row.name,
+      record_source: row.recordSource,
       report_type: row.reportType,
       sentiment_score: row.sentimentScore,
       operation_advice: row.operationAdvice,
@@ -146,6 +148,7 @@ export class HistoryService {
       task_id: row.taskId,
       stock_code: row.stockCode,
       stock_name: null,
+      record_source: 'analysis_center',
       report_type: row.reportType,
       sentiment_score: null,
       operation_advice: null,
@@ -255,6 +258,7 @@ export class HistoryService {
         query_id: row.queryId ?? queryId,
         stock_code: row.code,
         stock_name: row.name,
+        record_source: row.recordSource,
         report_type: row.reportType,
         created_at: row.createdAt.toISOString(),
         current_price: currentPrice != null ? Number(currentPrice) : null,

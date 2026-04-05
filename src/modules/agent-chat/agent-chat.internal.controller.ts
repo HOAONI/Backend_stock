@@ -3,10 +3,13 @@
 import { Body, Controller, Headers, HttpException, HttpStatus, Post } from '@nestjs/common';
 
 import {
+  AgentChatInternalAccountStateDto,
   AgentChatInternalBacktestDto,
   AgentChatInternalHistoryDto,
   AgentChatInternalPlaceOrderDto,
   AgentChatInternalRuntimeContextDto,
+  AgentChatInternalSaveAnalysisDto,
+  AgentChatInternalUserPreferencesDto,
 } from './agent-chat.dto';
 import { AgentChatService } from './agent-chat.service';
 
@@ -65,6 +68,32 @@ export class AgentChatInternalController {
     }
   }
 
+  @Post('/account-state')
+  async accountState(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: AgentChatInternalAccountStateDto,
+  ): Promise<Record<string, unknown>> {
+    requireInternalToken(authorization);
+    try {
+      return await this.agentChatService.getAccountStateForAgent(body.owner_user_id, Boolean(body.refresh ?? true));
+    } catch (error: unknown) {
+      throw toHttpException(error);
+    }
+  }
+
+  @Post('/user-preferences')
+  async userPreferences(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: AgentChatInternalUserPreferencesDto,
+  ): Promise<Record<string, unknown>> {
+    requireInternalToken(authorization);
+    try {
+      return await this.agentChatService.getUserPreferencesForAgent(body.owner_user_id, body.session_overrides);
+    } catch (error: unknown) {
+      throw toHttpException(error);
+    }
+  }
+
   @Post('/analysis-history')
   async analysisHistory(
     @Headers('authorization') authorization: string | undefined,
@@ -73,6 +102,24 @@ export class AgentChatInternalController {
     requireInternalToken(authorization);
     try {
       return await this.agentChatService.getAnalysisHistoryForAgent(body.owner_user_id, body.stock_codes ?? [], body.limit);
+    } catch (error: unknown) {
+      throw toHttpException(error);
+    }
+  }
+
+  @Post('/analysis-records')
+  async saveAnalysisRecords(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: AgentChatInternalSaveAnalysisDto,
+  ): Promise<Record<string, unknown>> {
+    requireInternalToken(authorization);
+    try {
+      return await this.agentChatService.saveAnalysisHistoryFromAgent(
+        body.owner_user_id,
+        body.session_id,
+        body.assistant_message_id,
+        body.analysis_result,
+      );
     } catch (error: unknown) {
       throw toHttpException(error);
     }

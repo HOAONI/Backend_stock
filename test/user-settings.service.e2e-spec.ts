@@ -29,6 +29,10 @@ function createProfile(overrides?: Record<string, unknown>) {
     strategyPositionMaxPct: 30,
     strategyStopLossPct: 8,
     strategyTakeProfitPct: 15,
+    strategyRiskProfile: 'balanced',
+    strategyAnalysisStrategy: 'auto',
+    strategyMaxSingleTradeAmount: null,
+    agentChatPreferencesJson: null,
     createdAt: new Date('2026-03-13T00:00:00.000Z'),
     updatedAt: new Date('2026-03-13T00:00:00.000Z'),
     ...overrides,
@@ -121,6 +125,12 @@ describe('UserSettingsService', () => {
     expect(payload.ai.apiTokenReadIssue).toBe('');
     expect(payload.ai.personalBindingAvailable).toBe(true);
     expect(payload.ai.personalBindingIssue).toBe('');
+    expect(payload.agentChat).toEqual({
+      executionPolicy: 'auto_execute_if_condition_met',
+      confirmationShortcutsEnabled: true,
+      followupFocusResolutionEnabled: true,
+      responseStyle: 'concise_factual',
+    });
   });
 
   it('persists SiliconFlow base url and model, then returns the saved personal config', async () => {
@@ -292,6 +302,9 @@ describe('UserSettingsService', () => {
       note: 'keep-me',
     });
     expect(payload.strategy).toEqual({
+      riskProfile: 'balanced',
+      analysisStrategy: 'auto',
+      maxSingleTradeAmount: null,
       positionMaxPct: 45,
       stopLossPct: 6,
       takeProfitPct: 20,
@@ -400,5 +413,60 @@ describe('UserSettingsService', () => {
     expect(payload.ai.apiToken).toBe('');
     expect(payload.ai.apiTokenReadable).toBe(false);
     expect(payload.ai.apiTokenReadIssue).toContain('PERSONAL_SECRET_KEY');
+  });
+
+  it('persists and normalizes agent chat preferences alongside existing strategy defaults', async () => {
+    const existing = createProfile({
+      agentChatPreferencesJson: {
+        executionPolicy: 'confirm_before_execute',
+        confirmationShortcutsEnabled: false,
+        followupFocusResolutionEnabled: false,
+        responseStyle: 'balanced',
+      },
+    });
+    const updated = createProfile({
+      agentChatPreferencesJson: {
+        executionPolicy: 'confirm_before_execute',
+        confirmationShortcutsEnabled: true,
+        followupFocusResolutionEnabled: false,
+        responseStyle: 'detailed',
+      },
+      updatedAt: new Date('2026-03-13T04:00:00.000Z'),
+    });
+    const prisma = {
+      adminUserProfile: {
+        upsert: jest.fn(async () => existing),
+        update: jest.fn(async () => updated),
+      },
+    } as any;
+    const service = new UserSettingsService(
+      prisma,
+      createPersonalCryptoMock() as any,
+      createAiRuntimeMock() as any,
+    );
+
+    const payload = await service.updateMySettings(7, {
+      agentChat: {
+        confirmationShortcutsEnabled: true,
+        responseStyle: 'detailed',
+      },
+    } as any) as Record<string, any>;
+
+    expect(prisma.adminUserProfile.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        agentChatPreferencesJson: {
+          executionPolicy: 'confirm_before_execute',
+          confirmationShortcutsEnabled: true,
+          followupFocusResolutionEnabled: false,
+          responseStyle: 'detailed',
+        },
+      }),
+    }));
+    expect(payload.agentChat).toEqual({
+      executionPolicy: 'confirm_before_execute',
+      confirmationShortcutsEnabled: true,
+      followupFocusResolutionEnabled: false,
+      responseStyle: 'detailed',
+    });
   });
 });

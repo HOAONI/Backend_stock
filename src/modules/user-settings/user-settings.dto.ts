@@ -1,7 +1,7 @@
 /** 用户个人设置模块使用的数据结构与参数校验定义。 */
 
 import { Type } from 'class-transformer';
-import { IsIn, IsNumber, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
+import { IsBoolean, IsIn, IsNumber, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
 
 export class UpdateSimulationSettingsDto {
   @IsOptional()
@@ -43,6 +43,20 @@ export class UpdateAiSettingsDto {
 
 export class UpdateStrategySettingsDto {
   @IsOptional()
+  @IsIn(['conservative', 'balanced', 'aggressive'])
+  riskProfile?: 'conservative' | 'balanced' | 'aggressive';
+
+  @IsOptional()
+  @IsIn(['auto', 'ma', 'rsi', 'custom'])
+  analysisStrategy?: 'auto' | 'ma' | 'rsi' | 'custom';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  maxSingleTradeAmount?: number;
+
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
@@ -64,6 +78,26 @@ export class UpdateStrategySettingsDto {
   takeProfitPct?: number;
 }
 
+export class UpdateAgentChatSettingsDto {
+  @IsOptional()
+  @IsIn(['auto_execute_if_condition_met', 'confirm_before_execute'])
+  executionPolicy?: 'auto_execute_if_condition_met' | 'confirm_before_execute';
+
+  @IsOptional()
+  @Type(() => Boolean)
+  @IsBoolean()
+  confirmationShortcutsEnabled?: boolean;
+
+  @IsOptional()
+  @Type(() => Boolean)
+  @IsBoolean()
+  followupFocusResolutionEnabled?: boolean;
+
+  @IsOptional()
+  @IsIn(['concise_factual', 'balanced', 'detailed'])
+  responseStyle?: 'concise_factual' | 'balanced' | 'detailed';
+}
+
 export class UpdateUserSettingsDto {
   @IsOptional()
   @ValidateNested()
@@ -79,4 +113,9 @@ export class UpdateUserSettingsDto {
   @ValidateNested()
   @Type(() => UpdateStrategySettingsDto)
   strategy?: UpdateStrategySettingsDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateAgentChatSettingsDto)
+  agentChat?: UpdateAgentChatSettingsDto;
 }

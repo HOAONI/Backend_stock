@@ -15,6 +15,11 @@ enum AnalysisTaskStatus {
   cancelled
 }
 
+enum AnalysisRecordSource {
+  analysis_center
+  agent_chat
+}
+
 enum AdminUserStatus {
   active
   disabled
@@ -63,6 +68,7 @@ model AnalysisHistory {
   queryId          String?   @map("query_id") @db.VarChar(64)
   code             String    @db.VarChar(10)
   name             String?   @db.VarChar(50)
+  recordSource     AnalysisRecordSource @default(analysis_center) @map("record_source")
   reportType       String?   @map("report_type") @db.VarChar(16)
   sentimentScore   Int?      @map("sentiment_score")
   operationAdvice  String?   @map("operation_advice") @db.VarChar(128)
@@ -574,6 +580,10 @@ model AdminUserProfile {
   strategyPositionMaxPct    Float    @default(30) @map("strategy_position_max_pct")
   strategyStopLossPct       Float    @default(8) @map("strategy_stop_loss_pct")
   strategyTakeProfitPct     Float    @default(15) @map("strategy_take_profit_pct")
+  strategyRiskProfile       String   @default("balanced") @map("strategy_risk_profile") @db.VarChar(32)
+  strategyAnalysisStrategy  String   @default("auto") @map("strategy_analysis_strategy") @db.VarChar(32)
+  strategyMaxSingleTradeAmount Float? @map("strategy_max_single_trade_amount")
+  agentChatPreferencesJson  Json?    @map("agent_chat_preferences_json")
   createdAt                 DateTime @default(now()) @map("created_at")
   updatedAt                 DateTime @updatedAt @map("updated_at")
 

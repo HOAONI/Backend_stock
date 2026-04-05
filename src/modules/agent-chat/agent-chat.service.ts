@@ -8,9 +8,16 @@ import { AgentClientService } from '@/common/agent/agent-client.service';
 import { AgentRuntimeConfig } from '@/common/agent/agent.types';
 import { PrismaService } from '@/common/database/prisma.service';
 import { safeJsonStringify } from '@/common/utils/json';
+import { evaluateTradingSessionGuardFromEnv, TradingSessionGuardResult } from '@/common/utils/trading-session';
 import { AnalysisService } from '@/modules/analysis/analysis.service';
 import { BrokerAccountsService } from '@/modules/broker-accounts/broker-accounts.service';
 import { TradingAccountService } from '@/modules/trading-account/trading-account.service';
+import { normalizeAgentChatPreferences } from '@/modules/user-settings/agent-chat-preferences';
+import {
+  normalizeAnalysisStrategy,
+  normalizeMaxSingleTradeAmount,
+  normalizeRiskProfile,
+} from '@/modules/user-settings/agent-user-preferences';
 
 import { AgentChatRequestDto } from './agent-chat.dto';
 
@@ -41,6 +48,50 @@ function asString(value: unknown, fallback = ''): string {
 function asNumber(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function asArrayOfRecords(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(item => item && typeof item === 'object' && !Array.isArray(item)) as Array<Record<string, unknown>>;
+}
+
+function pickDefined<T>(...values: Array<T | null | undefined>): T | null {
+  for (const value of values) {
+    if (value != null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function normalizeTrendPrediction(value: unknown): string {
+  const raw = asString(value);
+  const normalized = raw.toUpperCase();
+  if (normalized === 'BUY') {
+    return '看多';
+  }
+  if (normalized === 'HOLD') {
+    return '中性';
+  }
+  if (normalized === 'SELL') {
+    return '看空';
+  }
+  return raw;
+}
+
+function buildAgentChatQueryId(sessionId: string, assistantMessageId: number, stockCode: string): string {
+  return `agc_${sessionId}_${assistantMessageId}_${stockCode}`;
+}
+
+function toSessionGuardPayload(snapshot: TradingSessionGuardResult): Record<string, unknown> {
+  return {
+    timezone: snapshot.timezone,
+    sessions: snapshot.sessions,
+    evaluated_at: snapshot.evaluatedAt,
+    next_open_at: snapshot.nextOpenAt,
+  };
 }
 
 /** 负责承接 Agent 问股的前端代理、用户隔离和内部工具数据聚合。 */
@@ -96,9 +147,12 @@ export class AgentChatService {
   }
 
   private async buildAgentPayload(userId: number, username: string, body: AgentChatRequestDto): Promise<Record<string, unknown>> {
-    const [runtime, simulationAccount] = await Promise.all([
+    const [runtime, simulationAccount, profile] = await Promise.all([
       this.analysisService.buildRuntimeContext(userId, { includeApiToken: true }),
       this.brokerAccountsService.getMySimulationAccountStatus(userId),
+      this.prisma.adminUserProfile.findUnique({
+        where: { userId },
+      } as any),
     ]);
 
     let runtimeContext: Record<string, unknown> | null = null;
@@ -114,6 +168,7 @@ export class AgentChatService {
     const nextContext = {
       ...(body.context ?? {}),
       simulation_account: simulationAccount,
+      agent_chat_preferences: normalizeAgentChatPreferences((profile as Record<string, unknown> | null)?.agentChatPreferencesJson),
     };
 
     return {
@@ -161,6 +216,106 @@ export class AgentChatService {
     return {
       simulation_account: simulationAccount,
       runtime_context: runtimeContext,
+    };
+  }
+
+  async getAccountStateForAgent(ownerUserId: number, refresh = true): Promise<Record<string, unknown>> {
+    const simulationAccount = await this.brokerAccountsService.getMySimulationAccountStatus(ownerUserId);
+    let runtimeContext: Record<string, unknown> | null = null;
+    let accountState: Record<string, unknown> | null = null;
+
+    if (simulationAccount.is_bound && simulationAccount.is_verified) {
+      try {
+        const [runtime, account] = await Promise.all([
+          this.tradingAccountService.getRuntimeContext(ownerUserId, refresh),
+          this.tradingAccountService.getAccountState(ownerUserId, refresh),
+        ]);
+        runtimeContext = runtime as unknown as Record<string, unknown>;
+        accountState = account as unknown as Record<string, unknown>;
+      } catch {
+        runtimeContext = null;
+        accountState = null;
+      }
+    }
+
+    return {
+      simulation_account: simulationAccount,
+      account_state: accountState,
+      runtime_context: runtimeContext,
+    };
+  }
+
+  async getUserPreferencesForAgent(
+    ownerUserId: number,
+    sessionOverrides?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const profile = await this.prisma.adminUserProfile.findUnique({
+      where: { userId: ownerUserId },
+    } as any);
+    const source = asRecord(profile as Record<string, unknown> | null);
+    const sessionSource = asRecord(sessionOverrides);
+    const persistentTrading = {
+      riskProfile: normalizeRiskProfile(source.strategyRiskProfile),
+      analysisStrategy: normalizeAnalysisStrategy(source.strategyAnalysisStrategy),
+      maxSingleTradeAmount: normalizeMaxSingleTradeAmount(source.strategyMaxSingleTradeAmount),
+      positionMaxPct: asNumber(source.strategyPositionMaxPct) ?? 30,
+      stopLossPct: asNumber(source.strategyStopLossPct) ?? 8,
+      takeProfitPct: asNumber(source.strategyTakeProfitPct) ?? 15,
+    };
+    const persistentChat = normalizeAgentChatPreferences(source.agentChatPreferencesJson);
+    const effectiveTrading = {
+      riskProfile: normalizeRiskProfile(sessionSource.riskProfile ?? sessionSource.risk_profile ?? persistentTrading.riskProfile),
+      analysisStrategy: normalizeAnalysisStrategy(
+        sessionSource.analysisStrategy ?? sessionSource.analysis_strategy ?? persistentTrading.analysisStrategy,
+      ),
+      maxSingleTradeAmount: normalizeMaxSingleTradeAmount(
+        pickDefined(
+          sessionSource.maxSingleTradeAmount,
+          sessionSource.max_single_trade_amount,
+          persistentTrading.maxSingleTradeAmount,
+        ),
+      ),
+      positionMaxPct: asNumber(
+        pickDefined(sessionSource.positionMaxPct, sessionSource.position_max_pct, persistentTrading.positionMaxPct),
+      ) ?? persistentTrading.positionMaxPct,
+      stopLossPct: asNumber(
+        pickDefined(sessionSource.stopLossPct, sessionSource.stop_loss_pct, persistentTrading.stopLossPct),
+      ) ?? persistentTrading.stopLossPct,
+      takeProfitPct: asNumber(
+        pickDefined(sessionSource.takeProfitPct, sessionSource.take_profit_pct, persistentTrading.takeProfitPct),
+      ) ?? persistentTrading.takeProfitPct,
+    };
+    const effectiveChat = normalizeAgentChatPreferences({
+      ...persistentChat,
+      ...sessionSource,
+    });
+
+    return {
+      persistent: {
+        trading: persistentTrading,
+        chat: persistentChat,
+      },
+      session_overrides: sessionSource,
+      effective: {
+        trading: effectiveTrading,
+        chat: effectiveChat,
+      },
+      source: {
+        trading: {
+          riskProfile: sessionSource.riskProfile != null || sessionSource.risk_profile != null ? 'session' : 'profile',
+          analysisStrategy: sessionSource.analysisStrategy != null || sessionSource.analysis_strategy != null ? 'session' : 'profile',
+          maxSingleTradeAmount: sessionSource.maxSingleTradeAmount != null || sessionSource.max_single_trade_amount != null ? 'session' : 'profile',
+          positionMaxPct: sessionSource.positionMaxPct != null || sessionSource.position_max_pct != null ? 'session' : 'profile',
+          stopLossPct: sessionSource.stopLossPct != null || sessionSource.stop_loss_pct != null ? 'session' : 'profile',
+          takeProfitPct: sessionSource.takeProfitPct != null || sessionSource.take_profit_pct != null ? 'session' : 'profile',
+        },
+        chat: {
+          executionPolicy: sessionSource.executionPolicy != null ? 'session' : 'profile',
+          confirmationShortcutsEnabled: sessionSource.confirmationShortcutsEnabled != null ? 'session' : 'profile',
+          followupFocusResolutionEnabled: sessionSource.followupFocusResolutionEnabled != null ? 'session' : 'profile',
+          responseStyle: sessionSource.responseStyle != null ? 'session' : 'profile',
+        },
+      },
     };
   }
 
@@ -219,6 +374,213 @@ export class AgentChatService {
 
     return {
       total: items.length,
+      items,
+    };
+  }
+
+  private unwrapAgentAnalysisResult(analysisResult: Record<string, unknown>): Record<string, unknown> {
+    if (Array.isArray(analysisResult.stocks)) {
+      return analysisResult;
+    }
+
+    const nestedAnalysis = asRecord(analysisResult.analysis);
+    if (Array.isArray(nestedAnalysis.stocks)) {
+      return nestedAnalysis;
+    }
+
+    const nestedStructured = asRecord(analysisResult.structured_result);
+    if (Array.isArray(nestedStructured.stocks)) {
+      return nestedStructured;
+    }
+
+    return analysisResult;
+  }
+
+  private buildAgentAnalysisRawResult(
+    analysisResult: Record<string, unknown>,
+    stock: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const code = asString(stock.code);
+    const raw = asRecord(stock.raw);
+    const dataSnapshot = asRecord(raw.data);
+    const signalSnapshot = asRecord(raw.signal);
+    const riskSnapshot = asRecord(raw.risk);
+    const executionSnapshot = asRecord(raw.execution);
+
+    return {
+      agent_run: {
+        run_id: asString(analysisResult.run_id),
+        trade_date: asString(analysisResult.trade_date),
+        data_snapshot: code ? { [code]: dataSnapshot } : {},
+        signal_snapshot: code ? { [code]: signalSnapshot } : {},
+        risk_snapshot: code ? { [code]: riskSnapshot } : {},
+        execution_snapshot: code ? { [code]: executionSnapshot } : {},
+      },
+      data_snapshot: dataSnapshot,
+      signal_snapshot: signalSnapshot,
+      risk_snapshot: riskSnapshot,
+      execution_snapshot: executionSnapshot,
+    };
+  }
+
+  private buildAgentAnalysisContextSnapshot(input: {
+    analysisResult: Record<string, unknown>;
+    stock: Record<string, unknown>;
+    sessionId: string;
+    assistantMessageId: number;
+  }): Record<string, unknown> {
+    const raw = asRecord(input.stock.raw);
+    const dataSnapshot = asRecord(raw.data);
+    const portfolioSummary = asRecord(input.analysisResult.portfolio_summary);
+
+    return {
+      enhanced_context: asRecord(dataSnapshot.analysis_context),
+      realtime_quote_raw: asRecord(dataSnapshot.realtime_quote),
+      agent_chat: {
+        source: 'agent_chat',
+        session_id: input.sessionId,
+        assistant_message_id: input.assistantMessageId,
+        run_id: asString(input.analysisResult.run_id),
+        trade_date: asString(input.analysisResult.trade_date),
+        stock_code: asString(input.stock.code),
+        candidate_order_count: asNumber(portfolioSummary.candidate_order_count) ?? 0,
+        has_candidate_order: Boolean(asRecord(input.stock.candidate_order).code),
+      },
+    };
+  }
+
+  async saveAnalysisHistoryFromAgent(
+    ownerUserId: number,
+    sessionId: string,
+    assistantMessageId: number,
+    analysisResultInput: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const normalizedSessionId = asString(sessionId);
+    if (!normalizedSessionId) {
+      throw createServiceError('VALIDATION_ERROR', 'session_id 不能为空');
+    }
+    if (!Number.isInteger(assistantMessageId) || assistantMessageId <= 0) {
+      throw createServiceError('VALIDATION_ERROR', 'assistant_message_id 必须是正整数');
+    }
+
+    const analysisResult = this.unwrapAgentAnalysisResult(asRecord(analysisResultInput));
+    const stocks = asArrayOfRecords(analysisResult.stocks);
+    if (stocks.length === 0) {
+      return {
+        saved_count: 0,
+        skipped_count: 0,
+        items: [],
+      };
+    }
+
+    const items: Array<Record<string, unknown>> = [];
+    let savedCount = 0;
+    let skippedCount = 0;
+
+    for (const stock of stocks) {
+      const stockCode = asString(stock.code);
+      if (!stockCode) {
+        skippedCount += 1;
+        items.push({
+          stock_code: '',
+          status: 'skipped_invalid',
+          reason: 'missing_stock_code',
+        });
+        continue;
+      }
+
+      const queryId = buildAgentChatQueryId(normalizedSessionId, assistantMessageId, stockCode);
+      const existing = await this.prisma.analysisHistory.findFirst({
+        where: {
+          ownerUserId,
+          queryId,
+        },
+      });
+      if (existing) {
+        skippedCount += 1;
+        items.push({
+          query_id: queryId,
+          stock_code: stockCode,
+          status: 'skipped_existing',
+        });
+        continue;
+      }
+
+      const name = asString(stock.name, stockCode);
+      const raw = asRecord(stock.raw);
+      const signalSnapshot = asRecord(raw.signal);
+      const riskSnapshot = asRecord(raw.risk);
+      const aiPayload = asRecord(signalSnapshot.ai_payload);
+      const sniperPoints = asRecord(aiPayload.sniper_points);
+      const operationAdvice = asString(stock.operation_advice || signalSnapshot.operation_advice, '观望');
+      const sentimentScore = Math.round(asNumber(stock.sentiment_score ?? signalSnapshot.sentiment_score) ?? 50);
+      const trendPrediction = normalizeTrendPrediction(
+        stock.trend_signal ?? signalSnapshot.trend_signal ?? aiPayload.trend_prediction,
+      );
+      const analysisSummary = asString(
+        aiPayload.analysis_summary ?? aiPayload.summary,
+        `${name} 当前建议为 ${operationAdvice}`,
+      );
+      const idealBuy = asNumber(sniperPoints.ideal_buy);
+      const secondaryBuy = asNumber(sniperPoints.secondary_buy);
+      const stopLoss = asNumber(
+        pickDefined(
+          riskSnapshot.effective_stop_loss,
+          riskSnapshot.stop_loss,
+          stock.stop_loss,
+          signalSnapshot.stop_loss,
+          sniperPoints.stop_loss,
+        ),
+      );
+      const takeProfit = asNumber(
+        pickDefined(
+          riskSnapshot.effective_take_profit,
+          riskSnapshot.take_profit,
+          stock.take_profit,
+          signalSnapshot.take_profit,
+          sniperPoints.take_profit,
+        ),
+      );
+
+      await this.prisma.analysisHistory.create({
+        data: {
+          ownerUserId,
+          queryId,
+          code: stockCode,
+          name,
+          recordSource: 'agent_chat' as any,
+          reportType: 'detailed',
+          sentimentScore,
+          operationAdvice,
+          trendPrediction: trendPrediction || null,
+          analysisSummary,
+          rawResult: safeJsonStringify(this.buildAgentAnalysisRawResult(analysisResult, stock)),
+          newsContent: null,
+          contextSnapshot: safeJsonStringify(this.buildAgentAnalysisContextSnapshot({
+            analysisResult,
+            stock,
+            sessionId: normalizedSessionId,
+            assistantMessageId,
+          })),
+          idealBuy,
+          secondaryBuy,
+          stopLoss,
+          takeProfit,
+        },
+      });
+
+      savedCount += 1;
+      items.push({
+        query_id: queryId,
+        stock_code: stockCode,
+        stock_name: name,
+        status: 'saved',
+      });
+    }
+
+    return {
+      saved_count: savedCount,
+      skipped_count: skippedCount,
       items,
     };
   }
@@ -296,6 +658,9 @@ export class AgentChatService {
   private normalizeOrderStatus(payload: Record<string, unknown>): string {
     const order = asRecord(payload.order);
     const status = asString(order.provider_status ?? order.status ?? payload.status).toLowerCase();
+    if (status === 'blocked') {
+      return 'blocked';
+    }
     if (status === 'filled') {
       return 'filled';
     }
@@ -357,6 +722,25 @@ export class AgentChatService {
     const brokerAccountId = Number(simulationAccount.broker_account_id ?? 0);
     if (brokerAccountId <= 0) {
       throw createServiceError('SIMULATION_ACCOUNT_REQUIRED', '请先初始化并校验模拟盘账户');
+    }
+
+    const sessionGuard = evaluateTradingSessionGuardFromEnv();
+    if (!sessionGuard.allowed) {
+      const blockedPayload = {
+        status: 'blocked',
+        reason: 'outside_trading_session',
+        message: sessionGuard.message,
+        candidate_order: candidateOrder,
+        session_guard: toSessionGuardPayload(sessionGuard),
+      };
+      await this.writeExecutionAudit({
+        ownerUserId,
+        brokerAccountId,
+        taskId: sessionId,
+        status: 'blocked',
+        payload: blockedPayload,
+      });
+      return blockedPayload;
     }
 
     try {

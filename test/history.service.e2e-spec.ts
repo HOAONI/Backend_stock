@@ -10,6 +10,7 @@ describe('HistoryService.list', () => {
     expect(item).toHaveProperty('task_id');
     expect(item).toHaveProperty('stock_code');
     expect(item).toHaveProperty('stock_name');
+    expect(item).toHaveProperty('record_source');
     expect(item).toHaveProperty('report_type');
     expect(item).toHaveProperty('sentiment_score');
     expect(item).toHaveProperty('operation_advice');
@@ -49,6 +50,7 @@ describe('HistoryService.list', () => {
         queryId: 'query-1',
         code: '600519',
         name: '贵州茅台',
+        recordSource: 'agent_chat',
         reportType: 'detailed',
         sentimentScore: 86,
         operationAdvice: '继续持有',
@@ -85,6 +87,7 @@ describe('HistoryService.list', () => {
           task_id: 'query-1',
           stock_code: '600519',
           stock_name: '贵州茅台',
+          record_source: 'agent_chat',
           report_type: 'detailed',
           sentiment_score: 86,
           operation_advice: '继续持有',
@@ -141,6 +144,7 @@ describe('HistoryService.list', () => {
           task_id: 'task-failed-1',
           stock_code: 'AAPL',
           stock_name: null,
+          record_source: 'analysis_center',
           report_type: 'detailed',
           sentiment_score: null,
           operation_advice: null,
@@ -160,6 +164,7 @@ describe('HistoryService.list', () => {
         queryId: 'query-1',
         code: '600519',
         name: '贵州茅台',
+        recordSource: 'analysis_center',
         reportType: 'detailed',
         sentimentScore: 86,
         operationAdvice: '继续持有',
@@ -169,6 +174,7 @@ describe('HistoryService.list', () => {
         queryId: 'query-2',
         code: '000001',
         name: '平安银行',
+        recordSource: 'agent_chat',
         reportType: 'detailed',
         sentimentScore: 61,
         operationAdvice: '谨慎观察',
@@ -178,6 +184,7 @@ describe('HistoryService.list', () => {
         queryId: 'query-3',
         code: 'TSLA',
         name: 'Tesla',
+        recordSource: 'analysis_center',
         reportType: 'detailed',
         sentimentScore: 44,
         operationAdvice: '观望',
@@ -187,6 +194,7 @@ describe('HistoryService.list', () => {
         queryId: 'query-4',
         code: 'NVDA',
         name: 'NVIDIA',
+        recordSource: 'analysis_center',
         reportType: 'detailed',
         sentimentScore: 70,
         operationAdvice: '偏多',
@@ -265,6 +273,7 @@ describe('HistoryService.list', () => {
           task_id: 'query-2',
           stock_code: '000001',
           stock_name: '平安银行',
+          record_source: 'agent_chat',
           report_type: 'detailed',
           sentiment_score: 61,
           operation_advice: '谨慎观察',
@@ -277,6 +286,7 @@ describe('HistoryService.list', () => {
           task_id: 'task-failed-2',
           stock_code: 'MSFT',
           stock_name: null,
+          record_source: 'analysis_center',
           report_type: 'detailed',
           sentiment_score: null,
           operation_advice: null,
@@ -288,5 +298,50 @@ describe('HistoryService.list', () => {
     });
     expectHistoryItemContract(result.items[0], 'completed');
     expectHistoryItemContract(result.items[1], 'failed');
+  });
+});
+
+describe('HistoryService.detail', () => {
+  it('returns record_source in report meta', async () => {
+    const service = new HistoryService({
+      analysisHistory: {
+        findFirst: jest.fn(async () => ({
+          queryId: 'agc_session_11_600519',
+          code: '600519',
+          name: '贵州茅台',
+          recordSource: 'agent_chat',
+          reportType: 'detailed',
+          createdAt: new Date('2026-03-18T10:00:00.000Z'),
+          analysisSummary: '偏多看待',
+          operationAdvice: '买入',
+          trendPrediction: '看多',
+          sentimentScore: 88,
+          idealBuy: 1660,
+          secondaryBuy: 1630,
+          stopLoss: 1590,
+          takeProfit: 1760,
+          newsContent: null,
+          rawResult: '{"signal_snapshot":{"operation_advice":"买入"}}',
+          contextSnapshot: JSON.stringify({
+            enhanced_context: {},
+            realtime_quote_raw: {
+              price: 1680,
+              change_pct: 1.88,
+            },
+          }),
+        })),
+      },
+    } as any);
+
+    const result = await service.detail('agc_session_11_600519', { userId: 7, includeAll: false });
+
+    expect(result).toEqual(expect.objectContaining({
+      meta: expect.objectContaining({
+        query_id: 'agc_session_11_600519',
+        record_source: 'agent_chat',
+        current_price: 1680,
+        change_pct: 1.88,
+      }),
+    }));
   });
 });

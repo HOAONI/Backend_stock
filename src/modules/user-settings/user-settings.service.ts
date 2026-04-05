@@ -6,6 +6,12 @@ import { AiRuntimeService, DEFAULT_SILICONFLOW_BASE_URL, DEFAULT_SILICONFLOW_MOD
 import { PrismaService } from '@/common/database/prisma.service';
 import { PersonalCryptoService, PersonalSecretStatus } from '@/common/security/personal-crypto.service';
 
+import { normalizeAgentChatPreferences } from './agent-chat-preferences';
+import {
+  normalizeAnalysisStrategy,
+  normalizeMaxSingleTradeAmount,
+  normalizeRiskProfile,
+} from './agent-user-preferences';
 import { UpdateUserSettingsDto } from './user-settings.dto';
 
 interface ServiceError extends Error {
@@ -104,6 +110,7 @@ export class UserSettingsService {
   }
 
   private async toPayload(profile: Awaited<ReturnType<typeof this.ensureProfile>>): Promise<Record<string, unknown>> {
+    const profileRecord = profile as Record<string, unknown>;
     const resolvedLlm = await this.aiRuntimeService.resolveEffectiveLlmFromProfile(profile, {
       includeApiToken: false,
       requireSystemDefault: false,
@@ -148,10 +155,14 @@ export class UserSettingsService {
         },
       },
       strategy: {
+        riskProfile: normalizeRiskProfile(profileRecord.strategyRiskProfile),
+        analysisStrategy: normalizeAnalysisStrategy(profileRecord.strategyAnalysisStrategy),
+        maxSingleTradeAmount: normalizeMaxSingleTradeAmount(profileRecord.strategyMaxSingleTradeAmount),
         positionMaxPct: profile.strategyPositionMaxPct,
         stopLossPct: profile.strategyStopLossPct,
         takeProfitPct: profile.strategyTakeProfitPct,
       },
+      agentChat: normalizeAgentChatPreferences(profileRecord.agentChatPreferencesJson),
       updatedAt: profile.updatedAt.toISOString(),
     };
   }
@@ -166,6 +177,7 @@ export class UserSettingsService {
     const simulation = input.simulation;
     const ai = input.ai;
     const strategy = input.strategy;
+    const agentChat = input.agentChat;
 
     let aiTokenCiphertext: string | null | undefined;
     let aiTokenIv: string | null | undefined;
@@ -207,6 +219,14 @@ export class UserSettingsService {
       }
     }
 
+    const existingRecord = existing as Record<string, unknown>;
+    const nextAgentChatPreferences = agentChat
+      ? normalizeAgentChatPreferences({
+          ...normalizeAgentChatPreferences(existingRecord.agentChatPreferencesJson),
+          ...agentChat,
+        })
+      : undefined;
+
     const updated = await this.prisma.adminUserProfile.update({
       where: { userId: existing.userId },
       data: {
@@ -228,11 +248,19 @@ export class UserSettingsService {
         aiTokenCiphertext,
         aiTokenIv,
         aiTokenTag,
+        strategyRiskProfile: strategy?.riskProfile != null ? normalizeRiskProfile(strategy.riskProfile) : undefined,
+        strategyAnalysisStrategy: strategy?.analysisStrategy != null
+          ? normalizeAnalysisStrategy(strategy.analysisStrategy)
+          : undefined,
+        strategyMaxSingleTradeAmount: strategy?.maxSingleTradeAmount != null
+          ? normalizeMaxSingleTradeAmount(strategy.maxSingleTradeAmount)
+          : undefined,
         strategyPositionMaxPct: strategy?.positionMaxPct ?? undefined,
         strategyStopLossPct: strategy?.stopLossPct ?? undefined,
         strategyTakeProfitPct: strategy?.takeProfitPct ?? undefined,
-      },
-    });
+        agentChatPreferencesJson: nextAgentChatPreferences,
+      } as any,
+    } as any);
 
     return await this.toPayload(updated);
   }

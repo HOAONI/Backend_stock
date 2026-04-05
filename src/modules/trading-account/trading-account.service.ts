@@ -42,6 +42,35 @@ function normalizeText(value: unknown, max = 128): string | null {
   return text.slice(0, max);
 }
 
+function normalizePositionItem(item: Record<string, unknown>): Record<string, unknown> {
+  const quantity = asNumber(item.quantity ?? item.qty ?? item.volume) ?? 0;
+  const availableQty = asNumber(item.available_qty ?? item.availableQty ?? item.available ?? quantity) ?? quantity;
+  const avgCost = asNumber(item.avg_cost ?? item.avgCost ?? item.cost_price ?? item.costPrice);
+  const lastPrice = asNumber(item.last_price ?? item.lastPrice ?? item.price);
+  const marketValue = asNumber(item.market_value ?? item.marketValue);
+
+  return {
+    ...item,
+    code: String(item.code ?? item.stock_code ?? item.stockCode ?? item.symbol ?? '').trim(),
+    stock_name: String(item.stock_name ?? item.stockName ?? item.name ?? '').trim() || null,
+    quantity: Math.max(0, Math.floor(quantity)),
+    available_qty: Math.max(0, Math.floor(Math.min(availableQty, quantity))),
+    avg_cost: avgCost,
+    last_price: lastPrice,
+    market_value: marketValue,
+  };
+}
+
+function extractItemDateText(item: Record<string, unknown>): string | null {
+  for (const key of ['trade_date', 'tradeDate', 'submitted_at', 'submittedAt', 'created_at', 'createdAt', 'date']) {
+    const text = normalizeText(item[key], 32);
+    if (text && text.length >= 10) {
+      return text.slice(0, 10);
+    }
+  }
+  return null;
+}
+
 function resolveProviderOrderId(value: Record<string, unknown>): string | null {
   return normalizeText(value.provider_order_id ?? value.providerOrderId ?? value.order_id ?? value.orderId);
 }
@@ -108,6 +137,16 @@ export interface TradingRuntimeContextPayload {
   data_source: 'cache' | 'upstream';
   summary: Record<string, unknown>;
   positions: Array<Record<string, unknown>>;
+}
+
+export interface TradingAccountStatePayload extends TradingRuntimeContextPayload {
+  available_cash: number | null;
+  total_market_value: number | null;
+  total_asset: number | null;
+  order_count: number;
+  trade_count: number;
+  today_order_count: number;
+  today_trade_count: number;
 }
 
 /** 负责承接该领域的核心业务编排，把数据库访问、规则判断和外部调用收拢到一处。 */
@@ -298,6 +337,35 @@ export class TradingAccountService {
       data_source: snapshot.data_source,
       summary: snapshot.summary,
       positions: snapshot.positions,
+    };
+  }
+
+  async getAccountState(userId: number, refresh = false): Promise<TradingAccountStatePayload> {
+    const snapshot = await this.resolveSnapshot(userId, { refresh });
+    const summary = asRecord(snapshot.summary);
+    const snapshotDate = String(snapshot.snapshot_at ?? '').slice(0, 10);
+    const normalizedPositions = snapshot.positions.map(normalizePositionItem);
+    const countForDate = (items: Array<Record<string, unknown>>): number =>
+      items.reduce((total, item) => (extractItemDateText(item) === snapshotDate ? total + 1 : total), 0);
+
+    return {
+      broker_account_id: snapshot.account.broker_account_id,
+      broker_code: snapshot.account.broker_code,
+      provider_code: snapshot.account.provider_code,
+      provider_name: snapshot.account.provider_name,
+      account_uid: snapshot.account.account_uid,
+      account_display_name: snapshot.account.account_display_name,
+      snapshot_at: snapshot.snapshot_at,
+      data_source: snapshot.data_source,
+      summary,
+      positions: normalizedPositions,
+      available_cash: asNumber(summary.cash ?? summary.available_cash ?? summary.availableCash),
+      total_market_value: asNumber(summary.market_value ?? summary.total_market_value ?? summary.marketValue),
+      total_asset: asNumber(summary.total_asset ?? summary.total_equity ?? summary.totalAsset),
+      order_count: snapshot.orders.length,
+      trade_count: snapshot.trades.length,
+      today_order_count: countForDate(snapshot.orders),
+      today_trade_count: countForDate(snapshot.trades),
     };
   }
 

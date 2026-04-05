@@ -7,6 +7,7 @@ import { isAgentRunBridgeError } from '@/common/agent/agent.errors';
 import { AgentRunBridgeService } from '@/common/agent/agent-run-bridge.service';
 import type { AgentRuntimeConfig } from '@/common/agent/agent.types';
 import { PrismaService } from '@/common/database/prisma.service';
+import { evaluateTradingSessionGuardFromEnv } from '@/common/utils/trading-session';
 import { mapAgentRunToAnalysis } from '@/modules/analysis/analysis.mapper';
 import { AnalysisSchedulerService } from '@/modules/analysis/analysis-scheduler.service';
 import { AnalysisBrokerMeta, AnalysisService } from '@/modules/analysis/analysis.service';
@@ -71,22 +72,6 @@ function extractUpstreamFailure(rawMessage: string, fallbackCode: string): { cod
     code: String(matched[1] ?? '').trim() || fallbackCode,
     message: String(matched[2] ?? '').trim() || trimmed,
   };
-}
-
-function parseTradingSessions(raw: string): Array<{ start: number; end: number }> {
-  return String(raw ?? '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter((item) => item.includes('-'))
-    .map((item) => {
-      const [startRaw, endRaw] = item.split('-', 2);
-      const [sh, sm] = String(startRaw ?? '').split(':', 2);
-      const [eh, em] = String(endRaw ?? '').split(':', 2);
-      const start = Number(sh) * 60 + Number(sm);
-      const end = Number(eh) * 60 + Number(em);
-      return { start, end };
-    })
-    .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.start >= 0 && item.end > item.start);
 }
 
 const DEFAULT_STALE_TASK_TIMEOUT_MS = 15 * 60 * 1000;
@@ -468,41 +453,6 @@ export class TaskWorkerService {
     return /^(60|68|00|30)\d{4}$/.test(code);
   }
 
-  // 自动下单默认受交易时段保护，避免夜间补单或脚本重跑时把订单直接打进模拟盘。
-  private isWithinTradingSession(now: Date = new Date()): boolean {
-    const enforce = (process.env.ANALYSIS_AUTO_ORDER_ENFORCE_SESSION ?? 'true').toLowerCase() === 'true';
-    if (!enforce) {
-      return true;
-    }
-
-    const timezone = String(process.env.ANALYSIS_AUTO_ORDER_TIMEZONE ?? 'Asia/Shanghai').trim() || 'Asia/Shanghai';
-    const sessions = parseTradingSessions(process.env.ANALYSIS_AUTO_ORDER_TRADING_SESSIONS ?? '09:30-11:30,13:00-15:00');
-    if (sessions.length === 0) {
-      return true;
-    }
-
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      weekday: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
-    const parts = formatter.formatToParts(now);
-    const weekday = String(parts.find((p) => p.type === 'weekday')?.value ?? '').toLowerCase();
-    if (weekday === 'sat' || weekday === 'sun') {
-      return false;
-    }
-
-    const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? NaN);
-    const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? NaN);
-    if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
-      return false;
-    }
-    const minutes = hour * 60 + minute;
-    return sessions.some((window) => window.start <= minutes && minutes < window.end);
-  }
-
   private resolveAutoOrderCandidate(run: Record<string, unknown>, stockCode: string): {
     direction: 'buy' | 'sell';
     quantity: number;
@@ -661,7 +611,7 @@ export class TaskWorkerService {
         reason: 'non_a_share',
       };
     }
-    if (!this.isWithinTradingSession()) {
+    if (!evaluateTradingSessionGuardFromEnv().allowed) {
       return {
         status: 'skipped',
         reason: 'outside_trading_session',

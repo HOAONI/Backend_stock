@@ -20,22 +20,39 @@ describe('AnalysisService.getTaskList', () => {
     return new AnalysisService(prisma, {} as any, {} as any, {} as any, {} as any, {} as any);
   };
 
-  it('returns completed failed cancelled counts from owner-scoped aggregates', async () => {
-    const findMany = jest.fn(async () => [
-      {
-        taskId: 'task-1',
-        stockCode: '600519',
-        reportType: 'detailed',
-        status: AnalysisTaskStatus.completed,
-        progress: 100,
-        message: '分析完成',
-        error: null,
-        ownerUserId: 7,
-        createdAt: new Date('2026-03-07T10:00:00.000Z'),
-        startedAt: new Date('2026-03-07T10:00:03.000Z'),
-        completedAt: new Date('2026-03-07T10:00:30.000Z'),
-      },
-    ]);
+  it('returns owner-scoped counts and keeps recently completed tasks ahead of newer-created running tasks', async () => {
+    const findMany = jest
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          taskId: 'task-running',
+          stockCode: '600111',
+          reportType: 'detailed',
+          status: AnalysisTaskStatus.processing,
+          progress: 10,
+          message: '正在分析中...',
+          error: null,
+          ownerUserId: 7,
+          createdAt: new Date('2026-03-07T10:00:20.000Z'),
+          startedAt: new Date('2026-03-07T10:00:25.000Z'),
+          completedAt: null,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          taskId: 'task-completed-late',
+          stockCode: '600519',
+          reportType: 'detailed',
+          status: AnalysisTaskStatus.completed,
+          progress: 100,
+          message: '分析完成',
+          error: null,
+          ownerUserId: 7,
+          createdAt: new Date('2026-03-07T09:50:00.000Z'),
+          startedAt: new Date('2026-03-07T09:50:03.000Z'),
+          completedAt: new Date('2026-03-07T10:00:30.000Z'),
+        },
+      ]);
     const groupBy = jest.fn(async () => [
       { status: AnalysisTaskStatus.pending, _count: 2 },
       { status: AnalysisTaskStatus.processing, _count: 1 },
@@ -47,9 +64,27 @@ describe('AnalysisService.getTaskList', () => {
 
     const result = await service.getTaskList(null, 20, { userId: 7, includeAll: false });
 
-    expect(findMany).toHaveBeenCalledWith({
-      where: { ownerUserId: 7 },
+    expect(findMany).toHaveBeenNthCalledWith(1, {
+      where: {
+        ownerUserId: 7,
+        status: {
+          in: [AnalysisTaskStatus.pending, AnalysisTaskStatus.processing],
+        },
+      },
       orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+    expect(findMany).toHaveBeenNthCalledWith(2, {
+      where: {
+        ownerUserId: 7,
+        status: {
+          in: [AnalysisTaskStatus.completed, AnalysisTaskStatus.failed, AnalysisTaskStatus.cancelled],
+        },
+      },
+      orderBy: [
+        { completedAt: { sort: 'desc', nulls: 'last' } },
+        { createdAt: 'desc' },
+      ],
       take: 20,
     });
     expect(groupBy).toHaveBeenCalledWith({
@@ -66,20 +101,70 @@ describe('AnalysisService.getTaskList', () => {
       cancelled: 4,
       tasks: [
         {
-          task_id: 'task-1',
+          task_id: 'task-completed-late',
           stock_code: '600519',
           stock_name: null,
           status: AnalysisTaskStatus.completed,
           progress: 100,
           message: '分析完成',
           report_type: 'detailed',
-          created_at: '2026-03-07T10:00:00.000Z',
-          started_at: '2026-03-07T10:00:03.000Z',
+          created_at: '2026-03-07T09:50:00.000Z',
+          started_at: '2026-03-07T09:50:03.000Z',
           completed_at: '2026-03-07T10:00:30.000Z',
           error: null,
           owner_user_id: 7,
         },
+        {
+          task_id: 'task-running',
+          stock_code: '600111',
+          stock_name: null,
+          status: AnalysisTaskStatus.processing,
+          progress: 10,
+          message: '正在分析中...',
+          report_type: 'detailed',
+          created_at: '2026-03-07T10:00:20.000Z',
+          started_at: '2026-03-07T10:00:25.000Z',
+          completed_at: null,
+          error: null,
+          owner_user_id: 7,
+        },
       ],
+    });
+  });
+
+  it('uses completed time ordering when only terminal statuses are requested', async () => {
+    const findMany = jest.fn(async () => [
+      {
+        taskId: 'task-failed',
+        stockCode: '600123',
+        reportType: 'detailed',
+        status: AnalysisTaskStatus.failed,
+        progress: 100,
+        message: '分析失败',
+        error: 'boom',
+        ownerUserId: 7,
+        createdAt: new Date('2026-03-07T10:00:00.000Z'),
+        startedAt: new Date('2026-03-07T10:00:05.000Z'),
+        completedAt: new Date('2026-03-07T10:02:00.000Z'),
+      },
+    ]);
+    const groupBy = jest.fn(async () => []);
+    const service = createService({ findMany, groupBy });
+
+    await service.getTaskList('failed', 5, { userId: 7, includeAll: false });
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: {
+        ownerUserId: 7,
+        status: {
+          in: [AnalysisTaskStatus.failed],
+        },
+      },
+      orderBy: [
+        { completedAt: { sort: 'desc', nulls: 'last' } },
+        { createdAt: 'desc' },
+      ],
+      take: 5,
     });
   });
 });

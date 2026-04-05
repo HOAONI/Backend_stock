@@ -236,6 +236,24 @@ export class AnalysisService {
     return 'auto';
   }
 
+  private isRunningTaskStatus(status: AnalysisTaskStatus): boolean {
+    return status === AnalysisTaskStatus.pending || status === AnalysisTaskStatus.processing;
+  }
+
+  private isTerminalTaskStatus(status: AnalysisTaskStatus): boolean {
+    return status === AnalysisTaskStatus.completed
+      || status === AnalysisTaskStatus.failed
+      || status === AnalysisTaskStatus.cancelled;
+  }
+
+  private resolveTaskListSortTime(task: {
+    createdAt: Date;
+    startedAt: Date | null;
+    completedAt: Date | null;
+  }): number {
+    return task.completedAt?.getTime() ?? task.startedAt?.getTime() ?? task.createdAt.getTime();
+  }
+
   async findActiveTaskForOwnerStock(
     ownerUserId: number,
     stockCode: string,
@@ -594,21 +612,76 @@ export class AnalysisService {
       Object.values(AnalysisTaskStatus).includes(item as AnalysisTaskStatus),
     );
     const ownerFilter = this.buildOwnerFilter(scope);
+    const requestedStatuses = validStatuses.length > 0 ? validStatuses : Object.values(AnalysisTaskStatus);
+    const runningStatuses = requestedStatuses.filter(status => this.isRunningTaskStatus(status));
+    const terminalStatuses = requestedStatuses.filter(status => this.isTerminalTaskStatus(status));
 
-    const rows = await this.prisma.analysisTask.findMany({
-      where: {
-        ...ownerFilter,
-        ...(validStatuses.length > 0
-          ? {
-              status: {
-                in: validStatuses,
-              },
-            }
-          : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-    });
+    let rows: Array<{
+      taskId: string;
+      stockCode: string;
+      reportType: string;
+      status: AnalysisTaskStatus;
+      progress: number;
+      message: string | null;
+      error: string | null;
+      ownerUserId: number | null;
+      createdAt: Date;
+      startedAt: Date | null;
+      completedAt: Date | null;
+    }> = [];
+
+    if (runningStatuses.length > 0 && terminalStatuses.length > 0) {
+      const [runningRows, terminalRows] = await Promise.all([
+        this.prisma.analysisTask.findMany({
+          where: {
+            ...ownerFilter,
+            status: {
+              in: runningStatuses,
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: limit,
+        }),
+        this.prisma.analysisTask.findMany({
+          where: {
+            ...ownerFilter,
+            status: {
+              in: terminalStatuses,
+            },
+          },
+          orderBy: [
+            { completedAt: { sort: 'desc', nulls: 'last' } },
+            { createdAt: 'desc' },
+          ],
+          take: limit,
+        }),
+      ]);
+
+      rows = [...runningRows, ...terminalRows]
+        .sort((left, right) => this.resolveTaskListSortTime(right) - this.resolveTaskListSortTime(left))
+        .slice(0, limit);
+    } else {
+      const statusSubset = runningStatuses.length > 0 ? runningStatuses : terminalStatuses;
+      rows = await this.prisma.analysisTask.findMany({
+        where: {
+          ...ownerFilter,
+          ...(statusSubset.length > 0
+            ? {
+                status: {
+                  in: statusSubset,
+                },
+              }
+            : {}),
+        },
+        orderBy: runningStatuses.length > 0
+          ? { createdAt: 'desc' }
+          : [
+              { completedAt: { sort: 'desc', nulls: 'last' } },
+              { createdAt: 'desc' },
+            ],
+        take: limit,
+      });
+    }
 
     const counts = await this.prisma.analysisTask.groupBy({
       by: ['status'],

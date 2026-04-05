@@ -34,6 +34,27 @@ export class AgentChatInternalRuntimeContextDto {
   refresh?: boolean;
 }
 
+export class AgentChatInternalAccountStateDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  owner_user_id!: number;
+
+  @IsOptional()
+  refresh?: boolean;
+}
+
+export class AgentChatInternalUserPreferencesDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  owner_user_id!: number;
+
+  @IsOptional()
+  @IsObject()
+  session_overrides?: Record<string, unknown>;
+}
+
 export class AgentChatInternalHistoryDto {
   @Type(() => Number)
   @IsInt()
@@ -51,6 +72,24 @@ export class AgentChatInternalHistoryDto {
   @Min(1)
   @Max(20)
   limit = 5;
+}
+
+export class AgentChatInternalSaveAnalysisDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  owner_user_id!: number;
+
+  @IsString()
+  session_id!: string;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  assistant_message_id!: number;
+
+  @IsObject()
+  analysis_result!: Record<string, unknown>;
 }
 
 export class AgentChatInternalBacktestDto {
