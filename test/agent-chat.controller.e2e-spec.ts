@@ -35,6 +35,8 @@ describe('AgentChatController (e2e)', () => {
     listSessions: jest.Mock;
     getSession: jest.Mock;
     deleteSession: jest.Mock;
+    getMonitorSnapshot: jest.Mock;
+    openMonitorStream: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -44,6 +46,8 @@ describe('AgentChatController (e2e)', () => {
       listSessions: jest.fn(),
       getSession: jest.fn(),
       deleteSession: jest.fn(),
+      getMonitorSnapshot: jest.fn(),
+      openMonitorStream: jest.fn(),
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -143,5 +147,58 @@ describe('AgentChatController (e2e)', () => {
           message: 'Agent offline',
         });
       });
+  });
+
+  it('returns monitor snapshot for current user', async () => {
+    agentChatService.getMonitorSnapshot.mockResolvedValueOnce({
+      session: {
+        session_id: 'monitor-session-1',
+        title: '最近一次协作',
+        live_status: 'completed',
+      },
+      agent_cards: [
+        {
+          code: 'data',
+          title: '数据 Agent',
+          status: 'completed',
+          total_calls: 12,
+        },
+      ],
+      execution_chain: [],
+      stock_details: [],
+    });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/agent/chat/monitor')
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.session).toMatchObject({
+          session_id: 'monitor-session-1',
+          title: '最近一次协作',
+        });
+        expect(body.agent_cards[0]).toMatchObject({
+          code: 'data',
+          total_calls: 12,
+        });
+      });
+
+    expect(agentChatService.getMonitorSnapshot).toHaveBeenCalledWith(7);
+  });
+
+  it('streams monitor SSE snapshots from upstream agent service', async () => {
+    agentChatService.openMonitorStream.mockResolvedValueOnce(createSseResponse([
+      'event: connected\ndata: {"message":"Connected to agent chat monitor stream"}\n\n',
+      'event: snapshot\ndata: {"session":{"session_id":"monitor-session-1","live_status":"running"},"agent_cards":[],"execution_chain":[],"stock_details":[]}\n\n',
+    ]));
+
+    const response = await request(app.getHttpServer())
+      .get('/api/v1/agent/chat/monitor/stream')
+      .expect(200)
+      .expect('Content-Type', /text\/event-stream/);
+
+    expect(response.text).toContain('event: connected');
+    expect(response.text).toContain('event: snapshot');
+    expect(response.text).toContain('"session_id":"monitor-session-1"');
+    expect(agentChatService.openMonitorStream).toHaveBeenCalledWith(7);
   });
 });

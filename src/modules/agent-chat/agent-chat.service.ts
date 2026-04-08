@@ -205,6 +205,14 @@ export class AgentChatService {
     return await this.agentClient.deleteChatSession(userId, sessionId);
   }
 
+  async getMonitorSnapshot(userId: number): Promise<Record<string, unknown>> {
+    return await this.agentClient.getChatMonitor(userId);
+  }
+
+  async openMonitorStream(userId: number): Promise<Response> {
+    return await this.agentClient.openChatMonitorStream(userId);
+  }
+
   async getRuntimeContextForAgent(ownerUserId: number, refresh = true): Promise<Record<string, unknown>> {
     const simulationAccount = await this.brokerAccountsService.getMySimulationAccountStatus(ownerUserId);
     let runtimeContext: Record<string, unknown> | null = null;

@@ -133,4 +133,52 @@ export class AgentChatController {
       throw toHttpException(error);
     }
   }
+
+  @Get('/monitor')
+  async getMonitor(@Req() req: Request): Promise<Record<string, unknown>> {
+    try {
+      const user = this.requireUser(req);
+      return await this.agentChatService.getMonitorSnapshot(user.userId);
+    } catch (error: unknown) {
+      throw toHttpException(error);
+    }
+  }
+
+  @Get('/monitor/stream')
+  async streamMonitor(@Req() req: Request, @Res() res: Response): Promise<void> {
+    const user = this.requireUser(req);
+    try {
+      const upstream = await this.agentChatService.openMonitorStream(user.userId);
+      res.status(200);
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const reader = upstream.body?.getReader();
+      if (!reader) {
+        res.write(`event: error\ndata: ${JSON.stringify({ message: 'Agent monitor stream is unavailable' })}\n\n`);
+        res.end();
+        return;
+      }
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        if (value) {
+          res.write(Buffer.from(value));
+        }
+      }
+      res.end();
+    } catch (error: unknown) {
+      if (!res.headersSent) {
+        const httpError = toHttpException(error);
+        res.status(httpError.getStatus()).json(httpError.getResponse());
+        return;
+      }
+      res.write(`event: error\ndata: ${JSON.stringify({ message: (error as Error).message || 'monitor stream failed' })}\n\n`);
+      res.end();
+    }
+  }
 }

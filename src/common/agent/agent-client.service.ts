@@ -348,4 +348,19 @@ export class AgentClientService {
       },
     );
   }
+
+  async getChatMonitor(ownerUserId: number): Promise<Record<string, unknown>> {
+    return await this.request<Record<string, unknown>>(
+      `/internal/v1/chat/monitor${this.buildQuery({ owner_user_id: ownerUserId })}`,
+    );
+  }
+
+  async openChatMonitorStream(ownerUserId: number): Promise<Response> {
+    return await this.openStream(
+      `/internal/v1/chat/monitor/stream${this.buildQuery({ owner_user_id: ownerUserId })}`,
+      {
+        method: 'GET',
+      },
+    );
+  }
 }
