@@ -218,6 +218,7 @@ describe('BacktestAiInterpretationService', () => {
       }),
     }));
   });
+
 });
 
 describe('BacktestAgentClientService timeout config', () => {
@@ -234,6 +235,23 @@ describe('BacktestAgentClientService timeout config', () => {
     process.env.BACKTEST_AGENT_INTERPRET_TIMEOUT_MS = originalEnv.BACKTEST_AGENT_INTERPRET_TIMEOUT_MS;
     global.fetch = originalFetch;
     jest.restoreAllMocks();
+  });
+
+  it('uses an independent 180000ms default timeout for interpret requests', async () => {
+    process.env.BACKTEST_AGENT_TIMEOUT_MS = '30000';
+    delete process.env.BACKTEST_AGENT_RUN_TIMEOUT_MS;
+    delete process.env.BACKTEST_AGENT_INTERPRET_TIMEOUT_MS;
+
+    const timeoutSpy = jest.spyOn(global, 'setTimeout');
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      text: async () => '{"ok":true,"data":{}}',
+    })) as any;
+
+    const service = new BacktestAgentClientService();
+    await service.interpret({ items: [] });
+
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 180000);
   });
 
   it('uses dedicated timeout budgets for run and interpret requests', async () => {

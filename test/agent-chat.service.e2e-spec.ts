@@ -1,5 +1,4 @@
 /** Agent 问股服务单测，覆盖用户偏好注入到 Agent 载荷。 */
-
 import { AgentChatService } from '../src/modules/agent-chat/agent-chat.service';
 
 describe('AgentChatService', () => {

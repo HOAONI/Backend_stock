@@ -25,6 +25,7 @@ import {
   isBacktestStrategyTemplateCode,
   normalizeBacktestStrategyParams,
 } from './backtest-strategy-templates';
+import { BacktestAiInterpretationService } from './backtest-ai-interpretation.service';
 import { UserBacktestStrategyService } from './user-backtest-strategy.service';
 
 export const OVERALL_SENTINEL_CODE = '__overall__';
@@ -69,6 +70,7 @@ export class BacktestService {
     private readonly prisma: PrismaService,
     private readonly backtestAgentClient: BacktestAgentClientService,
     private readonly userBacktestStrategyService: UserBacktestStrategyService,
+    private readonly backtestAiInterpretationService: BacktestAiInterpretationService = {} as BacktestAiInterpretationService,
   ) {}
 
   private toNumber(value: unknown): number | null {
@@ -419,6 +421,32 @@ export class BacktestService {
       return text;
     }
     return 'pending';
+  }
+
+  private hasStrategyAiInterpretation(value: unknown): boolean {
+    const status = String(asRecord(asRecord(value).ai_interpretation).status ?? '').trim();
+    return status === 'ready' || status === 'failed' || status === 'unavailable';
+  }
+
+  private detailNeedsStrategyAiHydration(detail: Record<string, unknown>): boolean {
+    const items = asArrayOfRecords(detail.items);
+    if (items.length === 0) {
+      return false;
+    }
+    return items.some(item => !this.hasStrategyAiInterpretation(item.metrics));
+  }
+
+  private async hydrateStrategyRunGroupInterpretations(runGroupId: number): Promise<void> {
+    await this.backtestAiInterpretationService.ensureStrategyRunGroupInterpretations(runGroupId);
+    await this.prisma.strategyBacktestRunGroup.update({
+      where: { id: runGroupId },
+      data: {
+        aiInterpretationStatus: 'completed',
+        aiInterpretationCompletedAt: new Date(),
+        aiInterpretationNextRetryAt: null,
+        aiInterpretationErrorMessage: null,
+      },
+    });
   }
 
   private summaryRowsPayload(
@@ -1677,7 +1705,23 @@ export class BacktestService {
     runGroupId: number;
     requester: { userId: number; includeAll: boolean };
   }): Promise<Record<string, unknown> | null> {
-    return await this.loadStrategyRunGroupDetail(input.runGroupId, input.requester);
+    let detail = await this.loadStrategyRunGroupDetail(input.runGroupId, input.requester);
+    if (!detail) {
+      return null;
+    }
+
+    if (this.detailNeedsStrategyAiHydration(detail)) {
+      try {
+        await this.hydrateStrategyRunGroupInterpretations(input.runGroupId);
+        detail = await this.loadStrategyRunGroupDetail(input.runGroupId, input.requester) ?? detail;
+      } catch (error: unknown) {
+        this.logger.warn(
+          `Failed to lazy-hydrate strategy AI interpretation runGroupId=${input.runGroupId}: ${(error as Error)?.message ?? error}`,
+        );
+      }
+    }
+
+    return detail;
   }
 
   async getSummary(

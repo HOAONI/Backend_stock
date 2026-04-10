@@ -38,7 +38,7 @@ export class BacktestAgentClientService {
     );
     this.interpretTimeoutMs = Math.max(
       2000,
-      Number(process.env.BACKTEST_AGENT_INTERPRET_TIMEOUT_MS ?? process.env.BACKTEST_AGENT_TIMEOUT_MS ?? '60000'),
+      Number(process.env.BACKTEST_AGENT_INTERPRET_TIMEOUT_MS ?? '180000'),
     );
   }
 

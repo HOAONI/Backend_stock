@@ -24,6 +24,12 @@ function createAgentInterpretationServiceMock() {
   };
 }
 
+function createStrategyInterpretationServiceMock() {
+  return {
+    ensureStrategyRunGroupInterpretations: jest.fn(async () => {}),
+  };
+}
+
 describe('Backtest compare validation and forwarding', () => {
   describe('BacktestCompareRequestDto', () => {
     it('accepts valid strategy_codes and backward-compatible payload', () => {
@@ -558,6 +564,96 @@ describe('Backtest compare validation and forwarding', () => {
                 },
               },
             ],
+          },
+        ],
+      });
+    });
+
+    it('lazy-hydrates missing ai interpretation when strategy detail is opened', async () => {
+      const rowWithoutInterpretation = {
+        id: 1001,
+        code: '600519',
+        engineVersion: 'backtrader_v1',
+        aiInterpretationStatus: 'pending',
+        aiInterpretationErrorMessage: null,
+        aiInterpretationCompletedAt: null,
+        startDate: new Date('2024-01-01T00:00:00Z'),
+        endDate: new Date('2024-12-31T00:00:00Z'),
+        effectiveStartDate: new Date('2024-01-02T00:00:00Z'),
+        effectiveEndDate: new Date('2024-12-31T00:00:00Z'),
+        createdAt: new Date('2026-03-05T00:00:00Z'),
+        runs: [
+          {
+            id: 2001,
+            savedStrategyId: 88,
+            savedStrategyName: 'Fast MA',
+            strategyCode: 'ma_cross',
+            strategyVersion: 'v1',
+            paramsJson: { maWindow: 10 },
+            metricsJson: { total_return_pct: 12.3 },
+            benchmarkJson: { total_return_pct: 8.1 },
+            trades: [],
+            equityPoints: [],
+          },
+        ],
+      };
+      const rowWithInterpretation = {
+        ...rowWithoutInterpretation,
+        aiInterpretationStatus: 'completed',
+        aiInterpretationCompletedAt: new Date('2026-03-05T00:00:05Z'),
+        runs: [
+          {
+            ...rowWithoutInterpretation.runs[0],
+            metricsJson: {
+              total_return_pct: 12.3,
+              ai_interpretation: {
+                version: 'v1',
+                status: 'ready',
+                verdict: '表现中等',
+                summary: '这组策略在样本区间内收益稳定，但回撤控制一般。',
+              },
+            },
+          },
+        ],
+      };
+      const findFirst = jest
+        .fn()
+        .mockResolvedValueOnce(rowWithoutInterpretation)
+        .mockResolvedValueOnce(rowWithInterpretation);
+      const update = jest.fn(async () => rowWithInterpretation);
+      const interpretationService = createStrategyInterpretationServiceMock();
+      const service = new BacktestService(
+        {
+          strategyBacktestRunGroup: { findFirst, update },
+        } as any,
+        {} as any,
+        {} as any,
+        interpretationService as any,
+      );
+
+      const detail = await service.getStrategyRunDetail({
+        runGroupId: 1001,
+        requester: { userId: 9, includeAll: false },
+      });
+
+      expect(interpretationService.ensureStrategyRunGroupInterpretations).toHaveBeenCalledWith(1001);
+      expect(update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: 1001 },
+        data: expect.objectContaining({
+          aiInterpretationStatus: 'completed',
+          aiInterpretationErrorMessage: null,
+          aiInterpretationNextRetryAt: null,
+        }),
+      }));
+      expect(detail).toMatchObject({
+        ai_interpretation_status: 'completed',
+        items: [
+          {
+            metrics: {
+              ai_interpretation: {
+                status: 'ready',
+              },
+            },
           },
         ],
       });
