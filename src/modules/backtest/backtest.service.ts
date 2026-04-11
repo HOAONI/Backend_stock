@@ -429,6 +429,9 @@ export class BacktestService {
   }
 
   private detailNeedsStrategyAiHydration(detail: Record<string, unknown>): boolean {
+    if (this.normalizeStrategyAiInterpretationStatus(detail.ai_interpretation_status) === 'processing') {
+      return false;
+    }
     const items = asArrayOfRecords(detail.items);
     if (items.length === 0) {
       return false;
@@ -1467,6 +1470,7 @@ export class BacktestService {
     initialCapital?: number;
     commissionRate?: number;
     slippageBps?: number;
+    aiInterpretationMode?: 'backend' | 'agent_managed';
     requester: { userId: number; includeAll: boolean };
   }): Promise<Record<string, unknown>> {
     // 策略区间回测先把用户自定义策略解析成标准模板参数，再统一交给 Agent 执行并回写明细。
@@ -1494,6 +1498,8 @@ export class BacktestService {
     const initialCapital = this.toNumber(input.initialCapital);
     const commissionRate = this.toNumber(input.commissionRate);
     const slippageBps = this.toNumber(input.slippageBps);
+    const aiInterpretationMode = input.aiInterpretationMode === 'agent_managed' ? 'agent_managed' : 'backend';
+    const aiInterpretationRequestedAt = new Date();
 
     const payload = await this.backtestAgentClient.strategyRun({
       code,
@@ -1528,10 +1534,10 @@ export class BacktestService {
           effectiveStartDate: this.parseDayText(effectiveRange.start_date),
           effectiveEndDate: this.parseDayText(effectiveRange.end_date),
           engineVersion,
-          aiInterpretationStatus: 'pending',
+          aiInterpretationStatus: aiInterpretationMode === 'agent_managed' ? 'processing' : 'pending',
           aiInterpretationAttempts: 0,
-          aiInterpretationRequestedAt: new Date(),
-          aiInterpretationStartedAt: null,
+          aiInterpretationRequestedAt,
+          aiInterpretationStartedAt: aiInterpretationMode === 'agent_managed' ? aiInterpretationRequestedAt : null,
           aiInterpretationCompletedAt: null,
           aiInterpretationNextRetryAt: null,
           aiInterpretationErrorMessage: null,

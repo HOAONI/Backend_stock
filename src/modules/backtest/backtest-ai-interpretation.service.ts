@@ -28,6 +28,10 @@ type InterpretationMeta = {
   runtimeLlmPayload?: Record<string, unknown>;
 };
 
+interface InterpretationPersistenceError extends Error {
+  code?: string;
+}
+
 type AgentInterpretationItem = {
   item_key: string;
   status: InterpretationStatus | string;
@@ -40,6 +44,12 @@ const DEFAULT_UNAVAILABLE_SUMMARY = 'AI 解读暂不可用，请先检查个人�
 const DEFAULT_FAILED_SUMMARY = 'AI 解读生成失败，请稍后重试。';
 export const STRATEGY_AI_INTERPRETATION_MAX_ATTEMPTS = 3;
 const STRATEGY_AI_INTERPRETATION_RETRY_BASE_MS = 30_000;
+
+function buildInterpretationPersistenceError(code: string, message: string): InterpretationPersistenceError {
+  const error = new Error(message) as InterpretationPersistenceError;
+  error.code = code;
+  return error;
+}
 
 @Injectable()
 export class BacktestAiInterpretationService {
@@ -136,6 +146,99 @@ export class BacktestAiInterpretationService {
         ),
       })),
     );
+  }
+
+  async persistStrategyRunGroupInterpretationsFromAgent(input: {
+    ownerUserId: number;
+    runGroupId: number;
+    items: Array<Record<string, unknown>>;
+  }): Promise<Record<string, unknown>> {
+    const group = await this.prisma.strategyBacktestRunGroup.findUnique({
+      where: { id: input.runGroupId },
+      include: {
+        runs: {
+          orderBy: [{ strategyCode: 'asc' }, { id: 'asc' }],
+          select: {
+            id: true,
+            metricsJson: true,
+          },
+        },
+      },
+    });
+    if (!group) {
+      throw buildInterpretationPersistenceError('VALIDATION_ERROR', '策略回测分组不存在');
+    }
+    if (group.ownerUserId !== input.ownerUserId) {
+      throw buildInterpretationPersistenceError('VALIDATION_ERROR', '策略回测分组不属于当前用户');
+    }
+
+    const meta = await this.resolveInterpretationMeta(group.ownerUserId);
+    const recordMeta: Pick<InterpretationMeta, 'source' | 'provider' | 'model'> = 'unavailableMessage' in meta
+      ? {
+          source: 'system',
+          provider: '',
+          model: '',
+        }
+      : meta;
+    const itemByKey = new Map<string, Partial<AgentInterpretationItem>>(
+      input.items
+        .filter(item => item && typeof item === 'object')
+        .map((item) => {
+          const row = asRecord(item);
+          return [
+            String(row.item_key ?? '').trim(),
+            {
+              item_key: String(row.item_key ?? '').trim(),
+              status: String(row.status ?? '').trim(),
+              verdict: row.verdict,
+              summary: row.summary,
+              error_message: row.error_message,
+            },
+          ] as const;
+        })
+        .filter(([itemKey]) => Boolean(itemKey)),
+    );
+    const completedAt = new Date();
+    const updates = group.runs.map(run => ({
+      runId: run.id,
+      metrics: asRecord(run.metricsJson),
+      interpretation: this.buildInterpretationRecord(
+        recordMeta,
+        itemByKey.get(`strategy-run-${run.id}`) ?? {
+          status: 'failed',
+          summary: DEFAULT_FAILED_SUMMARY,
+          error_message: 'missing_item_in_agent_writeback',
+        },
+      ),
+    }));
+
+    await this.prisma.$transaction([
+      ...updates.map(update => this.prisma.strategyBacktestRun.update({
+        where: { id: update.runId },
+        data: {
+          metricsJson: toPrismaJson({
+            ...update.metrics,
+            ai_interpretation: update.interpretation,
+          }),
+        },
+      })),
+      this.prisma.strategyBacktestRunGroup.update({
+        where: { id: input.runGroupId },
+        data: {
+          aiInterpretationStatus: 'completed',
+          aiInterpretationStartedAt: completedAt,
+          aiInterpretationCompletedAt: completedAt,
+          aiInterpretationNextRetryAt: null,
+          aiInterpretationErrorMessage: null,
+        },
+      }),
+    ]);
+
+    return {
+      run_group_id: input.runGroupId,
+      saved_count: updates.length,
+      ai_interpretation_status: 'completed',
+    };
   }
 
   async ensureAgentRunGroupInterpretation(runGroupId: number): Promise<void> {

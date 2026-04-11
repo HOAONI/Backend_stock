@@ -219,6 +219,80 @@ describe('BacktestAiInterpretationService', () => {
     }));
   });
 
+  it('persists agent-produced strategy interpretations and marks the run group completed', async () => {
+    const strategyRunUpdate = jest.fn(async (input: Record<string, unknown>) => input);
+    const strategyRunGroupUpdate = jest.fn(async (input: Record<string, unknown>) => input);
+    const prisma = {
+      strategyBacktestRunGroup: {
+        findUnique: jest.fn(async () => createStrategyGroupRow()),
+        update: strategyRunGroupUpdate,
+      },
+      strategyBacktestRun: {
+        update: strategyRunUpdate,
+      },
+      $transaction: jest.fn(async (promises: Array<Promise<unknown>>) => await Promise.all(promises)),
+    };
+    const service = new BacktestAiInterpretationService(
+      prisma as any,
+      {} as any,
+      {
+        buildRuntimeContext: jest.fn(async () => ({
+          llmSource: 'personal',
+          effectiveLlm: { provider: 'openai', model: 'gpt-4o-mini' },
+          runtimeConfig: {
+            llm: {
+              provider: 'openai',
+              base_url: 'https://api.openai.com/v1',
+              model: 'gpt-4o-mini',
+              has_token: true,
+              api_token: 'secret',
+            },
+          },
+        })),
+      } as any,
+    );
+
+    await expect(service.persistStrategyRunGroupInterpretationsFromAgent({
+      ownerUserId: 9,
+      runGroupId: 101,
+      items: [
+        {
+          item_key: 'strategy-run-201',
+          status: 'ready',
+          verdict: '表现较强',
+          summary: '收益占优，回撤可控。',
+        },
+      ],
+    })).resolves.toEqual(expect.objectContaining({
+      run_group_id: 101,
+      saved_count: 1,
+      ai_interpretation_status: 'completed',
+    }));
+
+    expect(strategyRunUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 201 },
+      data: expect.objectContaining({
+        metricsJson: expect.objectContaining({
+          ai_interpretation: expect.objectContaining({
+            status: 'ready',
+            verdict: '表现较强',
+            summary: '收益占优，回撤可控。',
+            provider: 'openai',
+            model: 'gpt-4o-mini',
+          }),
+        }),
+      }),
+    }));
+    expect(strategyRunGroupUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 101 },
+      data: expect.objectContaining({
+        aiInterpretationStatus: 'completed',
+        aiInterpretationStartedAt: expect.any(Date),
+        aiInterpretationCompletedAt: expect.any(Date),
+      }),
+    }));
+  });
+
 });
 
 describe('BacktestAgentClientService timeout config', () => {

@@ -10,6 +10,7 @@ import {
   AgentChatInternalPortfolioHealthDto,
   AgentChatInternalRuntimeContextDto,
   AgentChatInternalSaveAnalysisDto,
+  AgentChatInternalSaveStrategyBacktestInterpretationDto,
   AgentChatInternalStrategyBacktestDto,
   AgentChatInternalUserPreferencesDto,
 } from './agent-chat.dto';
@@ -174,6 +175,29 @@ export class AgentChatInternalController {
         commissionRate: body.commission_rate,
         slippageBps: body.slippage_bps,
       });
+    } catch (error: unknown) {
+      throw toHttpException(error);
+    }
+  }
+
+  @Post('/strategy-backtest-interpretation')
+  async saveStrategyBacktestInterpretation(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: AgentChatInternalSaveStrategyBacktestInterpretationDto,
+  ): Promise<Record<string, unknown>> {
+    requireInternalToken(authorization);
+    try {
+      return await this.agentChatService.saveStrategyBacktestInterpretationForAgent(
+        body.owner_user_id,
+        body.run_group_id,
+        Array.isArray(body.items) ? body.items.map(item => ({
+          item_key: item.item_key,
+          status: item.status,
+          verdict: item.verdict,
+          summary: item.summary,
+          error_message: item.error_message,
+        })) : [],
+      );
     } catch (error: unknown) {
       throw toHttpException(error);
     }

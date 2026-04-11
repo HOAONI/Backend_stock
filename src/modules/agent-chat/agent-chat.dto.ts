@@ -183,6 +183,43 @@ export class AgentChatInternalStrategyBacktestDto {
   slippage_bps?: number;
 }
 
+export class AgentChatInternalStrategyBacktestInterpretationItemDto {
+  @IsString()
+  item_key!: string;
+
+  @IsString()
+  status!: string;
+
+  @IsOptional()
+  @IsString()
+  verdict?: string;
+
+  @IsOptional()
+  @IsString()
+  summary?: string;
+
+  @IsOptional()
+  @IsString()
+  error_message?: string;
+}
+
+export class AgentChatInternalSaveStrategyBacktestInterpretationDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  owner_user_id!: number;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  run_group_id!: number;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => AgentChatInternalStrategyBacktestInterpretationItemDto)
+  items!: AgentChatInternalStrategyBacktestInterpretationItemDto[];
+}
+
 export class AgentChatInternalPlaceOrderDto {
   @Type(() => Number)
   @IsInt()

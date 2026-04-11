@@ -287,11 +287,55 @@ describe('AgentChatService', () => {
         },
       ],
       initialCapital: 100000,
+      aiInterpretationMode: 'agent_managed',
       requester: {
         userId: 7,
         includeAll: false,
       },
     }));
+  });
+
+  it('persists agent-produced strategy backtest interpretations through the backtest ai service', async () => {
+    const persistStrategyRunGroupInterpretationsFromAgent = jest.fn(async payload => ({
+      ...payload,
+      ai_interpretation_status: 'completed',
+    }));
+    const service = new AgentChatService(
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      { persistStrategyRunGroupInterpretationsFromAgent } as any,
+    );
+
+    const payload = await service.saveStrategyBacktestInterpretationForAgent(7, 901, [
+      {
+        item_key: 'strategy-run-101',
+        status: 'ready',
+        verdict: '表现较强',
+        summary: '收益和回撤平衡较好。',
+      },
+    ]);
+
+    expect(payload).toEqual(expect.objectContaining({
+      ownerUserId: 7,
+      runGroupId: 901,
+      ai_interpretation_status: 'completed',
+    }));
+    expect(persistStrategyRunGroupInterpretationsFromAgent).toHaveBeenCalledWith({
+      ownerUserId: 7,
+      runGroupId: 901,
+      items: [
+        {
+          item_key: 'strategy-run-101',
+          status: 'ready',
+          verdict: '表现较强',
+          summary: '收益和回撤平衡较好。',
+        },
+      ],
+    });
   });
 
   it('mirrors agent analysis results into analysis history rows', async () => {

@@ -10,6 +10,7 @@ import { PrismaService } from '@/common/database/prisma.service';
 import { safeJsonStringify } from '@/common/utils/json';
 import { evaluateTradingSessionGuardFromEnv, TradingSessionGuardResult } from '@/common/utils/trading-session';
 import { AnalysisService } from '@/modules/analysis/analysis.service';
+import { BacktestAiInterpretationService } from '@/modules/backtest/backtest-ai-interpretation.service';
 import { BacktestService } from '@/modules/backtest/backtest.service';
 import { BrokerAccountsService } from '@/modules/broker-accounts/broker-accounts.service';
 import { TradingAccountService } from '@/modules/trading-account/trading-account.service';
@@ -105,6 +106,7 @@ export class AgentChatService {
     private readonly brokerAccountsService: BrokerAccountsService,
     private readonly tradingAccountService: TradingAccountService,
     private readonly backtestService: BacktestService = {} as BacktestService,
+    private readonly backtestAiInterpretationService: BacktestAiInterpretationService = {} as BacktestAiInterpretationService,
   ) {}
 
   private buildOwnerWhere(ownerUserId: number): { ownerUserId: number } {
@@ -703,7 +705,24 @@ export class AgentChatService {
       initialCapital: input.initialCapital,
       commissionRate: input.commissionRate,
       slippageBps: input.slippageBps,
+      aiInterpretationMode: 'agent_managed',
       requester: { userId: ownerUserId, includeAll: false },
+    });
+  }
+
+  async saveStrategyBacktestInterpretationForAgent(
+    ownerUserId: number,
+    runGroupId: number,
+    items: Array<Record<string, unknown>>,
+  ): Promise<Record<string, unknown>> {
+    if (!Array.isArray(items) || items.length === 0) {
+      throw createServiceError('VALIDATION_ERROR', 'items 不能为空');
+    }
+
+    return await this.backtestAiInterpretationService.persistStrategyRunGroupInterpretationsFromAgent({
+      ownerUserId,
+      runGroupId,
+      items,
     });
   }
 
