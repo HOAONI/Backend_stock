@@ -135,6 +135,7 @@ export class AgentChatInternalController {
         body.session_id,
         body.assistant_message_id,
         body.analysis_result,
+        body.news_items_by_stock,
       );
     } catch (error: unknown) {
       throw toHttpException(error);

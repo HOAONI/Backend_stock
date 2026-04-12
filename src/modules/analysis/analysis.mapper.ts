@@ -4,12 +4,14 @@ import { randomUUID } from 'node:crypto';
 
 import { AgentRunPayload } from '@/common/agent/agent.types';
 import { safeJsonStringify } from '@/common/utils/json';
+import { AnalysisNewsItem, extractAnalysisNewsFromAgentRun } from './analysis-news';
 
 export interface MappedAnalysis {
   queryId: string;
   stockCode: string;
   stockName: string;
   report: Record<string, unknown>;
+  newsItems: AnalysisNewsItem[];
   historyRecord: {
     queryId: string;
     code: string;
@@ -40,8 +42,13 @@ function parseOptionalNumber(value: unknown): number | null {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
-export function mapAgentRunToAnalysis(run: AgentRunPayload, stockCode: string, reportType: string): MappedAnalysis {
-  const queryId = String(run.run_id || '').trim() || randomUUID().replace(/-/g, '');
+export function mapAgentRunToAnalysis(
+  run: AgentRunPayload,
+  stockCode: string,
+  reportType: string,
+  options?: { queryId?: string },
+): MappedAnalysis {
+  const queryId = String(options?.queryId || run.run_id || '').trim() || randomUUID().replace(/-/g, '');
 
   const dataSnapshot = getCodeSnapshot(run.data_snapshot, stockCode);
   const signalSnapshot = getCodeSnapshot(run.signal_snapshot, stockCode);
@@ -67,6 +74,7 @@ export function mapAgentRunToAnalysis(run: AgentRunPayload, stockCode: string, r
     ).trim() || `${stockName} 当前建议为 ${operationAdvice}`;
 
   const sniperPoints = (aiPayload.sniper_points as Record<string, unknown>) || {};
+  const extractedNews = extractAnalysisNewsFromAgentRun(run, stockCode);
 
   const idealBuy = parseOptionalNumber(sniperPoints.ideal_buy);
   const secondaryBuy = parseOptionalNumber(sniperPoints.secondary_buy);
@@ -100,7 +108,7 @@ export function mapAgentRunToAnalysis(run: AgentRunPayload, stockCode: string, r
       take_profit: takeProfit != null ? String(takeProfit) : null,
     },
     details: {
-      news_content: null,
+      news_content: extractedNews.newsContent,
       raw_result: {
         agent_run: run,
         signal_snapshot: signalSnapshot,
@@ -125,7 +133,7 @@ export function mapAgentRunToAnalysis(run: AgentRunPayload, stockCode: string, r
     trendPrediction,
     analysisSummary,
     rawResult: safeJsonStringify(report.details.raw_result),
-    newsContent: null,
+    newsContent: extractedNews.newsContent,
     contextSnapshot: safeJsonStringify(report.details.context_snapshot),
     idealBuy,
     secondaryBuy,
@@ -138,6 +146,7 @@ export function mapAgentRunToAnalysis(run: AgentRunPayload, stockCode: string, r
     stockCode,
     stockName,
     report,
+    newsItems: extractedNews.items,
     historyRecord,
   };
 }

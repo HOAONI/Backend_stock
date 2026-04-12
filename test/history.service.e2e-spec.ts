@@ -2,6 +2,32 @@ import { AnalysisTaskStatus } from '@prisma/client';
 
 import { HistoryService } from '../src/modules/history/history.service';
 
+const createService = (overrides?: {
+  historyCount?: jest.Mock;
+  historyFindMany?: jest.Mock;
+  historyFindFirst?: jest.Mock;
+  taskCount?: jest.Mock;
+  taskFindMany?: jest.Mock;
+  newsFindMany?: jest.Mock;
+}): HistoryService => {
+  const prisma = {
+    analysisHistory: {
+      count: overrides?.historyCount ?? jest.fn(async () => 0),
+      findMany: overrides?.historyFindMany ?? jest.fn(async () => []),
+      findFirst: overrides?.historyFindFirst ?? jest.fn(async () => null),
+    },
+    analysisTask: {
+      count: overrides?.taskCount ?? jest.fn(async () => 0),
+      findMany: overrides?.taskFindMany ?? jest.fn(async () => []),
+    },
+    newsIntel: {
+      findMany: overrides?.newsFindMany ?? jest.fn(async () => []),
+    },
+  } as any;
+
+  return new HistoryService(prisma);
+};
+
 describe('HistoryService.list', () => {
   const scopeMine = { userId: 7, includeAll: false };
   const scopeAdmin = { userId: 1, includeAll: true };
@@ -17,26 +43,6 @@ describe('HistoryService.list', () => {
     expect(item).toHaveProperty('status', status);
     expect(item).toHaveProperty('error_message');
     expect(item).toHaveProperty('created_at');
-  };
-
-  const createService = (overrides?: {
-    historyCount?: jest.Mock;
-    historyFindMany?: jest.Mock;
-    taskCount?: jest.Mock;
-    taskFindMany?: jest.Mock;
-  }): HistoryService => {
-    const prisma = {
-      analysisHistory: {
-        count: overrides?.historyCount ?? jest.fn(async () => 0),
-        findMany: overrides?.historyFindMany ?? jest.fn(async () => []),
-      },
-      analysisTask: {
-        count: overrides?.taskCount ?? jest.fn(async () => 0),
-        findMany: overrides?.taskFindMany ?? jest.fn(async () => []),
-      },
-    } as any;
-
-    return new HistoryService(prisma);
   };
 
   afterEach(() => {
@@ -298,6 +304,157 @@ describe('HistoryService.list', () => {
     });
     expectHistoryItemContract(result.items[0], 'completed');
     expectHistoryItemContract(result.items[1], 'failed');
+  });
+});
+
+describe('HistoryService.getNews', () => {
+  it('returns persisted news rows by query id for the analysis center news tab', async () => {
+    const newsFindMany = jest.fn(async () => [
+      {
+        title: '贵州茅台发布新品',
+        snippet: '公司发布新品并强调渠道稳定。',
+        url: 'https://example.com/news-1',
+      },
+      {
+        title: '贵州茅台披露分红方案',
+        snippet: '公司公告年度分红预案。',
+        url: 'https://example.com/news-2',
+      },
+    ]);
+    const historyFindFirst = jest.fn(async () => null);
+    const service = createService({ newsFindMany, historyFindFirst });
+
+    const result = await service.getNews('agc_session-123_11_600519', 20, { userId: 7, includeAll: false });
+
+    expect(newsFindMany).toHaveBeenCalledWith({
+      where: {
+        queryId: 'agc_session-123_11_600519',
+        ownerUserId: 7,
+      },
+      orderBy: [{ publishedDate: 'desc' }, { fetchedAt: 'desc' }],
+      take: 20,
+    });
+    expect(historyFindFirst).toHaveBeenCalledWith({
+      where: {
+        queryId: 'agc_session-123_11_600519',
+        ownerUserId: 7,
+      },
+      select: {
+        code: true,
+        rawResult: true,
+      },
+    });
+    expect(result).toEqual([
+      {
+        title: '贵州茅台发布新品',
+        snippet: '公司发布新品并强调渠道稳定。',
+        url: 'https://example.com/news-1',
+      },
+      {
+        title: '贵州茅台披露分红方案',
+        snippet: '公司公告年度分红预案。',
+        url: 'https://example.com/news-2',
+      },
+    ]);
+  });
+
+  it('falls back to raw_result news_items when persisted rows are missing', async () => {
+    const newsFindMany = jest.fn(async () => []);
+    const historyFindFirst = jest.fn(async () => ({
+      code: '600519',
+      rawResult: JSON.stringify({
+        signal_snapshot: {
+          ai_payload: {
+            news_summary: '茅台新闻偏多',
+            news_items: [
+              {
+                title: '贵州茅台发布新品',
+                snippet: '公司发布新品并强调渠道稳定。',
+                url: 'https://example.com/news-1',
+              },
+              {
+                title: '贵州茅台披露分红方案',
+                snippet: '公司公告年度分红预案。',
+                url: 'https://example.com/news-2',
+              },
+            ],
+          },
+        },
+      }),
+    }));
+    const service = createService({ newsFindMany, historyFindFirst });
+
+    const result = await service.getNews('query-1', 20, { userId: 7, includeAll: false });
+
+    expect(historyFindFirst).toHaveBeenCalledWith({
+      where: {
+        queryId: 'query-1',
+        ownerUserId: 7,
+      },
+      select: {
+        code: true,
+        rawResult: true,
+      },
+    });
+    expect(result).toEqual([
+      {
+        title: '贵州茅台发布新品',
+        snippet: '公司发布新品并强调渠道稳定。',
+        url: 'https://example.com/news-1',
+      },
+      {
+        title: '贵州茅台披露分红方案',
+        snippet: '公司公告年度分红预案。',
+        url: 'https://example.com/news-2',
+      },
+    ]);
+  });
+
+  it('merges persisted and raw_result news with url dedupe and respects limit', async () => {
+    const newsFindMany = jest.fn(async () => [
+      {
+        title: '已落库新闻',
+        snippet: '来自 news_intel。',
+        url: 'https://example.com/news-1',
+      },
+    ]);
+    const historyFindFirst = jest.fn(async () => ({
+      code: '600519',
+      rawResult: JSON.stringify({
+        signal_snapshot: {
+          ai_payload: {
+            news_items: [
+              {
+                title: '重复新闻',
+                snippet: '这条会被去重。',
+                url: 'https://example.com/news-1',
+              },
+              {
+                title: '兜底新闻',
+                snippet: '来自 raw_result。',
+                url: 'https://example.com/news-2',
+              },
+            ],
+          },
+        },
+      }),
+    }));
+    const service = createService({ newsFindMany, historyFindFirst });
+
+    const result = await service.getNews('query-1', 2, { userId: 7, includeAll: false });
+
+    expect(result).toEqual([
+      {
+        title: '已落库新闻',
+        snippet: '来自 news_intel。',
+        url: 'https://example.com/news-1',
+      },
+      {
+        title: '兜底新闻',
+        snippet: '来自 raw_result。',
+        url: 'https://example.com/news-2',
+      },
+    ]);
   });
 });
 

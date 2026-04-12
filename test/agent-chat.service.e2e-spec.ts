@@ -341,12 +341,20 @@ describe('AgentChatService', () => {
   it('mirrors agent analysis results into analysis history rows', async () => {
     const create = jest.fn(async ({ data }) => data);
     const findFirst = jest.fn(async () => null);
+    const newsFindUnique = jest.fn(async () => null);
+    const newsCreate = jest.fn(async ({ data }) => data);
+    const newsUpdate = jest.fn(async ({ data }) => data);
     const service = new AgentChatService(
       {} as any,
       {
         analysisHistory: {
           findFirst,
           create,
+        },
+        newsIntel: {
+          findUnique: newsFindUnique,
+          create: newsCreate,
+          update: newsUpdate,
         },
       } as any,
       {} as any,
@@ -392,6 +400,29 @@ describe('AgentChatService', () => {
                 trend_signal: 'BUY',
                 ai_payload: {
                   analysis_summary: '基本面与趋势共振，适合跟踪买入。',
+                  news_summary: '白酒需求稳健，短线情绪偏多。',
+                  news_items: [
+                    {
+                      title: '贵州茅台发布新品',
+                      snippet: '公司发布新品并强调渠道稳定。',
+                      url: 'https://example.com/news-1',
+                      source: 'example.com',
+                      published_date: '2026-04-03T09:30:00+08:00',
+                      provider: 'mock_search',
+                      dimension: 'news',
+                      query: '贵州茅台 最新新闻',
+                    },
+                    {
+                      title: '贵州茅台披露分红方案',
+                      snippet: '公司公告年度分红预案。',
+                      url: 'https://example.com/news-2',
+                      source: 'cninfo.com.cn',
+                      published_date: '2026-04-02',
+                      provider: 'mock_search',
+                      dimension: 'announcement',
+                      query: '贵州茅台 公告',
+                    },
+                  ],
                   sniper_points: {
                     ideal_buy: 1660,
                     secondary_buy: 1635,
@@ -467,6 +498,7 @@ describe('AgentChatService', () => {
         sentimentScore: 88,
         trendPrediction: '看多',
         analysisSummary: '基本面与趋势共振，适合跟踪买入。',
+        newsContent: '白酒需求稳健，短线情绪偏多。',
         idealBuy: 1660,
         secondaryBuy: 1635,
         stopLoss: 1590,
@@ -499,6 +531,24 @@ describe('AgentChatService', () => {
         candidate_order_count: 2,
       }),
     }));
+    expect(newsFindUnique).toHaveBeenCalledTimes(2);
+    expect(newsCreate).toHaveBeenCalledTimes(2);
+    expect(newsCreate).toHaveBeenNthCalledWith(1, {
+      data: expect.objectContaining({
+        ownerUserId: 7,
+        queryId: 'agc_session-123_11_600519',
+        code: '600519',
+        title: '贵州茅台发布新品',
+        url: 'https://example.com/news-1',
+        provider: 'mock_search',
+        dimension: 'news',
+        requesterPlatform: 'agent_chat',
+        requesterUserId: '7',
+        requesterChatId: 'session-123',
+        requesterMessageId: '11',
+      }),
+    });
+    expect(newsUpdate).not.toHaveBeenCalled();
   });
 
   it('blocks agent simulated orders outside trading session and preserves audit payload', async () => {
@@ -586,13 +636,41 @@ describe('AgentChatService', () => {
     const findFirst = jest.fn(async () => ({
       id: 9,
       queryId: 'agc_session-123_11_600519',
+      newsContent: null,
     }));
+    const newsFindUnique = jest.fn(async () => ({
+      id: 31,
+      ownerUserId: null,
+      queryId: null,
+      code: '',
+      name: null,
+      dimension: null,
+      query: null,
+      provider: null,
+      title: '旧新闻',
+      snippet: null,
+      source: null,
+      publishedDate: null,
+      querySource: null,
+      requesterPlatform: null,
+      requesterUserId: null,
+      requesterChatId: null,
+      requesterMessageId: null,
+      requesterQuery: null,
+    }));
+    const newsCreate = jest.fn(async ({ data }) => data);
+    const newsUpdate = jest.fn(async ({ data }) => data);
     const service = new AgentChatService(
       {} as any,
       {
         analysisHistory: {
           findFirst,
           create,
+        },
+        newsIntel: {
+          findUnique: newsFindUnique,
+          create: newsCreate,
+          update: newsUpdate,
         },
       } as any,
       {} as any,
@@ -614,7 +692,22 @@ describe('AgentChatService', () => {
             trend_signal: 'BUY',
             raw: {
               data: {},
-              signal: {},
+              signal: {
+                ai_payload: {
+                  news_items: [
+                    {
+                      title: '贵州茅台发布新品',
+                      snippet: '公司发布新品并强调渠道稳定。',
+                      url: 'https://example.com/news-1',
+                      source: 'example.com',
+                      published_date: '2026-04-03T09:30:00+08:00',
+                      provider: 'mock_search',
+                      dimension: 'news',
+                      query: '贵州茅台 最新新闻',
+                    },
+                  ],
+                },
+              },
               risk: {},
               execution: {},
             },
@@ -630,10 +723,35 @@ describe('AgentChatService', () => {
         {
           query_id: 'agc_session-123_11_600519',
           stock_code: '600519',
+          stock_name: '贵州茅台',
           status: 'skipped_existing',
+          news_saved_count: 1,
         },
       ],
     });
     expect(create).not.toHaveBeenCalled();
+    expect(newsCreate).not.toHaveBeenCalled();
+    expect(newsUpdate).toHaveBeenCalledWith({
+      where: {
+        url: 'https://example.com/news-1',
+      },
+      data: expect.objectContaining({
+        ownerUserId: 7,
+        queryId: 'agc_session-123_11_600519',
+        code: '600519',
+        name: '贵州茅台',
+        dimension: 'news',
+        query: '贵州茅台 最新新闻',
+        provider: 'mock_search',
+        snippet: '公司发布新品并强调渠道稳定。',
+        source: 'example.com',
+        querySource: 'agent_chat',
+        requesterPlatform: 'agent_chat',
+        requesterUserId: '7',
+        requesterChatId: 'session-123',
+        requesterMessageId: '11',
+        requesterQuery: '贵州茅台 最新新闻',
+      }),
+    });
   });
 });

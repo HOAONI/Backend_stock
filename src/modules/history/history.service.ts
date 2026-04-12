@@ -6,6 +6,7 @@ import { AnalysisTaskStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '@/common/database/prisma.service';
 import { safeJsonParse } from '@/common/utils/json';
 import type { RequesterScope } from '@/modules/analysis/analysis.service';
+import { extractAnalysisNewsFromRawResult, mergeHistoryNewsItems, toHistoryNewsItems } from '@/modules/analysis/analysis-news';
 
 function sentimentLabel(score: number): string {
   if (score >= 80) return '极度乐观';
@@ -295,10 +296,34 @@ export class HistoryService {
       take: limit,
     });
 
-    return rows.map((row) => ({
+    const persistedItems = rows.map((row) => ({
       title: row.title,
       snippet: row.snippet ?? '',
       url: row.url,
     }));
+
+    if (persistedItems.length >= limit) {
+      return persistedItems;
+    }
+
+    const historyRow = await this.prisma.analysisHistory.findFirst({
+      where: {
+        queryId,
+        ...this.buildOwnerFilter(scope),
+      },
+      select: {
+        code: true,
+        rawResult: true,
+      },
+    });
+
+    if (!historyRow?.rawResult) {
+      return persistedItems;
+    }
+
+    const rawResult = safeJsonParse<Record<string, unknown> | string | null>(historyRow.rawResult, historyRow.rawResult);
+    const fallbackItems = toHistoryNewsItems(extractAnalysisNewsFromRawResult(rawResult, historyRow.code).items);
+
+    return mergeHistoryNewsItems(persistedItems, fallbackItems, limit);
   }
 }

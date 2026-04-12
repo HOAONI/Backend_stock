@@ -52,6 +52,23 @@ function asNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function asDate(value: unknown): Date | null {
+  const text = asString(value);
+  if (!text) {
+    return null;
+  }
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function truncateText(value: unknown, maxLength: number, fallback = ''): string {
+  const text = asString(value, fallback);
+  if (!text) {
+    return fallback;
+  }
+  return text.length > maxLength ? text.slice(0, maxLength) : text;
+}
+
 function asArrayOfRecords(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) {
     return [];
@@ -85,6 +102,27 @@ function normalizeTrendPrediction(value: unknown): string {
 
 function buildAgentChatQueryId(sessionId: string, assistantMessageId: number, stockCode: string): string {
   return `agc_${sessionId}_${assistantMessageId}_${stockCode}`;
+}
+
+interface NormalizedAgentNewsItem {
+  ownerUserId: number;
+  queryId: string;
+  code: string;
+  name: string;
+  dimension: string | null;
+  query: string | null;
+  provider: string | null;
+  title: string;
+  snippet: string;
+  url: string;
+  source: string | null;
+  publishedDate: Date | null;
+  querySource: string;
+  requesterPlatform: string;
+  requesterUserId: string;
+  requesterChatId: string;
+  requesterMessageId: string;
+  requesterQuery: string | null;
 }
 
 function toSessionGuardPayload(snapshot: TradingSessionGuardResult): Record<string, unknown> {
@@ -479,11 +517,198 @@ export class AgentChatService {
     };
   }
 
+  private pickAgentNewsItems(
+    stock: Record<string, unknown>,
+    newsItemsByStock: Record<string, unknown>,
+  ): Array<Record<string, unknown>> {
+    const stockCode = asString(stock.code);
+    if (!stockCode) {
+      return [];
+    }
+
+    if (Object.prototype.hasOwnProperty.call(newsItemsByStock, stockCode)) {
+      return asArrayOfRecords(newsItemsByStock[stockCode]);
+    }
+
+    const raw = asRecord(stock.raw);
+    const signalSnapshot = asRecord(raw.signal);
+    const aiPayload = asRecord(signalSnapshot.ai_payload);
+    return asArrayOfRecords(aiPayload.news_items);
+  }
+
+  private normalizeAgentNewsItems(input: {
+    ownerUserId: number;
+    queryId: string;
+    stockCode: string;
+    stockName: string;
+    sessionId: string;
+    assistantMessageId: number;
+    items: Array<Record<string, unknown>>;
+  }): NormalizedAgentNewsItem[] {
+    const seenUrls = new Set<string>();
+    const normalized: NormalizedAgentNewsItem[] = [];
+
+    for (const item of input.items) {
+      const url = truncateText(item.url, 1000);
+      if (!url || seenUrls.has(url)) {
+        continue;
+      }
+
+      const title = truncateText(item.title, 300, url);
+      if (!title) {
+        continue;
+      }
+
+      normalized.push({
+        ownerUserId: input.ownerUserId,
+        queryId: truncateText(input.queryId, 64),
+        code: truncateText(input.stockCode, 10),
+        name: truncateText(input.stockName, 50, input.stockCode),
+        dimension: truncateText(item.dimension, 32) || null,
+        query: truncateText(item.query, 255) || null,
+        provider: truncateText(item.provider, 32) || null,
+        title,
+        snippet: asString(item.snippet),
+        url,
+        source: truncateText(item.source, 100) || null,
+        publishedDate: asDate(item.published_date ?? item.publishedDate),
+        querySource: 'agent_chat',
+        requesterPlatform: 'agent_chat',
+        requesterUserId: String(input.ownerUserId),
+        requesterChatId: truncateText(input.sessionId, 64),
+        requesterMessageId: String(input.assistantMessageId),
+        requesterQuery: truncateText(item.query, 255) || null,
+      });
+      seenUrls.add(url);
+    }
+
+    return normalized;
+  }
+
+  private buildAgentNewsContent(aiPayload: Record<string, unknown>, newsItems: NormalizedAgentNewsItem[]): string | null {
+    const summary = asString(aiPayload.news_summary);
+    if (summary) {
+      return summary;
+    }
+
+    const titles = newsItems.map(item => item.title).filter(Boolean).slice(0, 3);
+    if (titles.length === 0) {
+      return null;
+    }
+    return `相关新闻：${titles.join('；')}`;
+  }
+
+  private async persistAgentNewsItems(newsItems: NormalizedAgentNewsItem[]): Promise<number> {
+    let persistedCount = 0;
+
+    for (const item of newsItems) {
+      const existing = await this.prisma.newsIntel.findUnique({
+        where: {
+          url: item.url,
+        },
+      });
+
+      if (existing) {
+        const updateData: Prisma.NewsIntelUncheckedUpdateInput = {
+          fetchedAt: new Date(),
+        };
+
+        if (existing.ownerUserId == null) {
+          updateData.ownerUserId = item.ownerUserId;
+        }
+        if (!asString(existing.queryId)) {
+          updateData.queryId = item.queryId;
+        }
+        if (!asString(existing.code)) {
+          updateData.code = item.code;
+        }
+        if (!asString(existing.name) && item.name) {
+          updateData.name = item.name;
+        }
+        if (!asString(existing.dimension) && item.dimension) {
+          updateData.dimension = item.dimension;
+        }
+        if (!asString(existing.query) && item.query) {
+          updateData.query = item.query;
+        }
+        if (!asString(existing.provider) && item.provider) {
+          updateData.provider = item.provider;
+        }
+        if (!asString(existing.title) && item.title) {
+          updateData.title = item.title;
+        }
+        if (!asString(existing.snippet) && item.snippet) {
+          updateData.snippet = item.snippet;
+        }
+        if (!asString(existing.source) && item.source) {
+          updateData.source = item.source;
+        }
+        if (!existing.publishedDate && item.publishedDate) {
+          updateData.publishedDate = item.publishedDate;
+        }
+        if (!asString(existing.querySource) && item.querySource) {
+          updateData.querySource = item.querySource;
+        }
+        if (!asString(existing.requesterPlatform) && item.requesterPlatform) {
+          updateData.requesterPlatform = item.requesterPlatform;
+        }
+        if (!asString(existing.requesterUserId) && item.requesterUserId) {
+          updateData.requesterUserId = item.requesterUserId;
+        }
+        if (!asString(existing.requesterChatId) && item.requesterChatId) {
+          updateData.requesterChatId = item.requesterChatId;
+        }
+        if (!asString(existing.requesterMessageId) && item.requesterMessageId) {
+          updateData.requesterMessageId = item.requesterMessageId;
+        }
+        if (!asString(existing.requesterQuery) && item.requesterQuery) {
+          updateData.requesterQuery = item.requesterQuery;
+        }
+
+        await this.prisma.newsIntel.update({
+          where: {
+            url: item.url,
+          },
+          data: updateData,
+        });
+        persistedCount += 1;
+        continue;
+      }
+
+      await this.prisma.newsIntel.create({
+        data: {
+          ownerUserId: item.ownerUserId,
+          queryId: item.queryId,
+          code: item.code,
+          name: item.name,
+          dimension: item.dimension,
+          query: item.query,
+          provider: item.provider,
+          title: item.title,
+          snippet: item.snippet,
+          url: item.url,
+          source: item.source,
+          publishedDate: item.publishedDate,
+          querySource: item.querySource,
+          requesterPlatform: item.requesterPlatform,
+          requesterUserId: item.requesterUserId,
+          requesterChatId: item.requesterChatId,
+          requesterMessageId: item.requesterMessageId,
+          requesterQuery: item.requesterQuery,
+        },
+      });
+      persistedCount += 1;
+    }
+
+    return persistedCount;
+  }
+
   async saveAnalysisHistoryFromAgent(
     ownerUserId: number,
     sessionId: string,
     assistantMessageId: number,
     analysisResultInput: Record<string, unknown>,
+    newsItemsByStockInput: Record<string, unknown> = {},
   ): Promise<Record<string, unknown>> {
     const normalizedSessionId = asString(sessionId);
     if (!normalizedSessionId) {
@@ -494,6 +719,7 @@ export class AgentChatService {
     }
 
     const analysisResult = this.unwrapAgentAnalysisResult(asRecord(analysisResultInput));
+    const newsItemsByStock = asRecord(newsItemsByStockInput);
     const stocks = asArrayOfRecords(analysisResult.stocks);
     if (stocks.length === 0) {
       return {
@@ -526,15 +752,6 @@ export class AgentChatService {
           queryId,
         },
       });
-      if (existing) {
-        skippedCount += 1;
-        items.push({
-          query_id: queryId,
-          stock_code: stockCode,
-          status: 'skipped_existing',
-        });
-        continue;
-      }
 
       const name = asString(stock.name, stockCode);
       const raw = asRecord(stock.raw);
@@ -571,33 +788,59 @@ export class AgentChatService {
           sniperPoints.take_profit,
         ),
       );
-
-      await this.prisma.analysisHistory.create({
-        data: {
-          ownerUserId,
-          queryId,
-          code: stockCode,
-          name,
-          recordSource: 'agent_chat' as any,
-          reportType: 'detailed',
-          sentimentScore,
-          operationAdvice,
-          trendPrediction: trendPrediction || null,
-          analysisSummary,
-          rawResult: safeJsonStringify(this.buildAgentAnalysisRawResult(analysisResult, stock)),
-          newsContent: null,
-          contextSnapshot: safeJsonStringify(this.buildAgentAnalysisContextSnapshot({
-            analysisResult,
-            stock,
-            sessionId: normalizedSessionId,
-            assistantMessageId,
-          })),
-          idealBuy,
-          secondaryBuy,
-          stopLoss,
-          takeProfit,
-        },
+      const normalizedNewsItems = this.normalizeAgentNewsItems({
+        ownerUserId,
+        queryId,
+        stockCode,
+        stockName: name,
+        sessionId: normalizedSessionId,
+        assistantMessageId,
+        items: this.pickAgentNewsItems(stock, newsItemsByStock),
       });
+      const newsContent = this.buildAgentNewsContent(aiPayload, normalizedNewsItems);
+
+      if (!existing) {
+        await this.prisma.analysisHistory.create({
+          data: {
+            ownerUserId,
+            queryId,
+            code: stockCode,
+            name,
+            recordSource: 'agent_chat' as any,
+            reportType: 'detailed',
+            sentimentScore,
+            operationAdvice,
+            trendPrediction: trendPrediction || null,
+            analysisSummary,
+            rawResult: safeJsonStringify(this.buildAgentAnalysisRawResult(analysisResult, stock)),
+            newsContent,
+            contextSnapshot: safeJsonStringify(this.buildAgentAnalysisContextSnapshot({
+              analysisResult,
+              stock,
+              sessionId: normalizedSessionId,
+              assistantMessageId,
+            })),
+            idealBuy,
+            secondaryBuy,
+            stopLoss,
+            takeProfit,
+          },
+        });
+      }
+
+      const newsSavedCount = await this.persistAgentNewsItems(normalizedNewsItems);
+
+      if (existing) {
+        skippedCount += 1;
+        items.push({
+          query_id: queryId,
+          stock_code: stockCode,
+          stock_name: name,
+          status: 'skipped_existing',
+          news_saved_count: newsSavedCount,
+        });
+        continue;
+      }
 
       savedCount += 1;
       items.push({
@@ -605,6 +848,7 @@ export class AgentChatService {
         stock_code: stockCode,
         stock_name: name,
         status: 'saved',
+        news_saved_count: newsSavedCount,
       });
     }
 

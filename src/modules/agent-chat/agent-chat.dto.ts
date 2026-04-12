@@ -102,6 +102,10 @@ export class AgentChatInternalSaveAnalysisDto {
 
   @IsObject()
   analysis_result!: Record<string, unknown>;
+
+  @IsOptional()
+  @IsObject()
+  news_items_by_stock?: Record<string, unknown>;
 }
 
 export class AgentChatInternalBacktestDto {

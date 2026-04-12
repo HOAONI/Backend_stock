@@ -17,6 +17,7 @@ import { SystemConfigService } from '@/modules/system-config/system-config.servi
 import { TradingAccountService, TradingRuntimeContextPayload } from '@/modules/trading-account/trading-account.service';
 
 import { AnalyzeRequestDto } from './analysis.dto';
+import { normalizeAnalysisNewsItems, persistAnalysisNewsItems } from './analysis-news';
 import { mapAgentRunToAnalysis } from './analysis.mapper';
 
 export interface RequesterScope {
@@ -539,6 +540,13 @@ export class AnalysisService {
     }
     );
     const mapped = mapAgentRunToAnalysis(bridgeResult.run, input.stockCode, input.reportType);
+    const normalizedNewsItems = normalizeAnalysisNewsItems({
+      ownerUserId: input.userId,
+      queryId: mapped.historyRecord.queryId,
+      stockCode: mapped.historyRecord.code,
+      stockName: mapped.historyRecord.name,
+      items: mapped.newsItems,
+    });
 
     await this.prisma.analysisHistory.create({
       data: {
@@ -560,6 +568,7 @@ export class AnalysisService {
         takeProfit: mapped.historyRecord.takeProfit,
       },
     });
+    await persistAnalysisNewsItems(this.prisma, normalizedNewsItems);
 
     return {
       query_id: mapped.queryId,

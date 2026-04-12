@@ -11,6 +11,7 @@ jest.mock('../src/modules/analysis/analysis.mapper', () => ({
     stockCode: '600121',
     stockName: '测试股票',
     report: {},
+    newsItems: [],
     historyRecord: {
       queryId: 'q-test',
       code: '600121',
@@ -30,6 +31,36 @@ jest.mock('../src/modules/analysis/analysis.mapper', () => ({
     },
   })),
 }));
+
+const mapAgentRunToAnalysisMock = jest.requireMock('../src/modules/analysis/analysis.mapper').mapAgentRunToAnalysis as jest.Mock;
+
+function createMappedAnalysis(overrides?: Record<string, unknown>) {
+  return {
+    queryId: 'q-test',
+    stockCode: '600121',
+    stockName: '测试股票',
+    report: {},
+    newsItems: [],
+    historyRecord: {
+      queryId: 'q-test',
+      code: '600121',
+      name: '测试股票',
+      reportType: 'detailed',
+      sentimentScore: 50,
+      operationAdvice: '观望',
+      trendPrediction: '观望',
+      analysisSummary: 'ok',
+      rawResult: '{}',
+      newsContent: null,
+      contextSnapshot: '{}',
+      idealBuy: null,
+      secondaryBuy: null,
+      stopLoss: null,
+      takeProfit: null,
+    },
+    ...overrides,
+  };
+}
 
 describe('Runtime config forwarding and auto-order guards', () => {
   // 默认返回一份“个人 AI 可用”的解析结果，具体分支通过 override 覆盖。
@@ -430,6 +461,112 @@ describe('Runtime config forwarding and auto-order guards', () => {
       const options = (agentRunBridge.runViaAsyncTask as jest.Mock).mock.calls[0]?.[2] as Record<string, unknown>;
       expect((options.runtimeConfig as Record<string, unknown>).llm).toBeUndefined();
     });
+
+    it('persists normalized news intel for sync analysis results', async () => {
+      mapAgentRunToAnalysisMock.mockReturnValueOnce(createMappedAnalysis({
+        queryId: 'query-news-1',
+        stockCode: '600519',
+        stockName: '贵州茅台',
+        newsItems: [
+          {
+            title: '贵州茅台发布新品',
+            snippet: '公司发布新品并强调渠道稳定。',
+            url: 'https://example.com/news-1',
+            source: 'example.com',
+            publishedDate: new Date('2026-04-02T09:00:00.000Z'),
+            provider: 'mock_search',
+            dimension: 'news',
+            query: '贵州茅台 最新新闻',
+          },
+        ],
+        historyRecord: {
+          queryId: 'query-news-1',
+          code: '600519',
+          name: '贵州茅台',
+          reportType: 'detailed',
+          sentimentScore: 68,
+          operationAdvice: '偏多',
+          trendPrediction: '看多',
+          analysisSummary: '新闻偏多',
+          rawResult: '{}',
+          newsContent: '新闻偏多',
+          contextSnapshot: '{}',
+          idealBuy: null,
+          secondaryBuy: null,
+          stopLoss: null,
+          takeProfit: null,
+        },
+      }));
+
+      const analysisHistoryCreate = jest.fn(async () => ({}));
+      const newsFindUnique = jest.fn(async () => null);
+      const newsCreate = jest.fn(async () => ({}));
+      const prisma = {
+        adminUserProfile: {
+          findUnique: jest.fn(async () => null),
+        },
+        adminUser: {
+          findUnique: jest.fn(async () => ({ username: 'tester' })),
+        },
+        $transaction: jest.fn(async (queries: Array<Promise<unknown>>) => Promise.all(queries)),
+        analysisHistory: { create: analysisHistoryCreate },
+        newsIntel: {
+          findUnique: newsFindUnique,
+          create: newsCreate,
+          update: jest.fn(async () => ({})),
+        },
+      } as any;
+      const agentRunBridge = {
+        runViaAsyncTask: jest.fn(async () => ({
+          run: {},
+          bridgeMeta: {
+            agent_task_id: 't1',
+            agent_run_id: 'r1',
+            poll_attempts: 0,
+            last_agent_status: 'completed',
+            bridge_error_code: null,
+          },
+        })),
+      } as any;
+
+      const service = new AnalysisService(
+        prisma,
+        agentRunBridge,
+        createAiRuntimeService() as any,
+        { resolveSimulationAccess: jest.fn(async () => null) } as any,
+        createSystemConfigService() as any,
+        {} as any,
+      );
+
+      await service.runSync({
+        stockCode: '600519',
+        reportType: 'detailed',
+        userId: 1,
+        executionMode: 'paper',
+      });
+
+      expect(analysisHistoryCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          queryId: 'query-news-1',
+          code: '600519',
+          newsContent: '新闻偏多',
+        }),
+      });
+      expect(newsFindUnique).toHaveBeenCalledWith({
+        where: { url: 'https://example.com/news-1' },
+      });
+      expect(newsCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          ownerUserId: 1,
+          queryId: 'query-news-1',
+          code: '600519',
+          title: '贵州茅台发布新品',
+          querySource: 'analysis_center',
+          requesterPlatform: 'analysis_center',
+          requesterUserId: '1',
+        }),
+      });
+    });
   });
 
   describe('TaskWorkerService.maybeAutoPlaceOrder', () => {
@@ -613,6 +750,172 @@ describe('Runtime config forwarding and auto-order guards', () => {
       })).toEqual({
         code: 'llm_request_timeout',
         message: 'DeepSeek request timed out after 120000ms',
+      });
+    });
+
+    it('persists normalized news intel for async worker results using taskId as query id', async () => {
+      mapAgentRunToAnalysisMock.mockReturnValueOnce(createMappedAnalysis({
+        queryId: 'task-news-1',
+        stockCode: '600519',
+        stockName: '贵州茅台',
+        report: {
+          meta: {
+            query_id: 'task-news-1',
+          },
+        },
+        newsItems: [
+          {
+            title: '贵州茅台披露分红方案',
+            snippet: '公司公告年度分红预案。',
+            url: 'https://example.com/news-2',
+            source: 'cninfo.com.cn',
+            publishedDate: new Date('2026-04-01T00:00:00.000Z'),
+            provider: 'mock_search',
+            dimension: 'announcement',
+            query: '贵州茅台 公告',
+          },
+        ],
+        historyRecord: {
+          queryId: 'task-news-1',
+          code: '600519',
+          name: '贵州茅台',
+          reportType: 'detailed',
+          sentimentScore: 72,
+          operationAdvice: '买入',
+          trendPrediction: '看多',
+          analysisSummary: '公告偏多',
+          rawResult: '{}',
+          newsContent: '公告偏多',
+          contextSnapshot: '{}',
+          idealBuy: null,
+          secondaryBuy: null,
+          stopLoss: null,
+          takeProfit: null,
+        },
+      }));
+
+      const newsFindUnique = jest.fn(async () => null);
+      const newsCreate = jest.fn(async () => ({}));
+      const analysisHistoryCreate = jest.fn(async () => ({}));
+      const analysisTaskUpdate = jest.fn(async () => ({}));
+      const service = new TaskWorkerService(
+        {
+          analysisTask: {
+            findUnique: jest.fn(async () => ({
+              id: 11,
+              taskId: 'task-news-1',
+              stockCode: '600519',
+              reportType: 'detailed',
+              ownerUserId: 7,
+              requestPayload: {
+                meta: {
+                  execution_mode: 'paper',
+                  requested_execution_mode: 'paper',
+                  auto_order_enabled: false,
+                  broker_plan_reason: 'paper_analysis_only',
+                },
+              },
+              scheduleId: null,
+            })),
+            update: analysisTaskUpdate,
+          },
+          analysisHistory: {
+            create: analysisHistoryCreate,
+          },
+          newsIntel: {
+            findUnique: newsFindUnique,
+            create: newsCreate,
+            update: jest.fn(async () => ({})),
+          },
+        } as any,
+        {
+          runViaAsyncTask: jest.fn(async () => ({
+            run: {},
+            bridgeMeta: {
+              agent_task_id: 'agt-task-1',
+              agent_run_id: 'agt-run-1',
+              poll_attempts: 0,
+              last_agent_status: 'completed',
+              bridge_error_code: null,
+            },
+          })),
+        } as any,
+        {
+          resolveExecutionMetaFromPayload: jest.fn(() => ({
+            execution_mode: 'paper',
+            requested_execution_mode: 'paper',
+            broker_account_id: null,
+            auto_order_enabled: false,
+            broker_plan_reason: 'paper_analysis_only',
+          })),
+          buildRuntimeContext: jest.fn(async () => ({
+            runtimeConfig: {
+              account: {
+                account_name: 'user-7',
+                initial_cash: 100000,
+              },
+              strategy: {
+                position_max_pct: 30,
+                stop_loss_pct: 7,
+                take_profit_pct: 15,
+              },
+            },
+            maskedRuntimeConfig: {
+              account: {
+                account_name: 'user-7',
+                initial_cash: 100000,
+              },
+              strategy: {
+                position_max_pct: 30,
+                stop_loss_pct: 7,
+                take_profit_pct: 15,
+              },
+            },
+            accountName: 'user-7',
+            llmSource: 'system',
+            effectiveLlm: {
+              provider: 'openai',
+              baseUrl: 'https://api.openai.com/v1',
+              model: 'gpt-4o-mini',
+              forwardRuntimeLlm: false,
+            },
+          })),
+          buildRuntimeConfigForExecution: jest.fn((runtimeConfig: Record<string, unknown>) => runtimeConfig),
+        } as any,
+        {} as any,
+        { updateWorkerHeartbeat: jest.fn(async () => undefined) } as any,
+        {} as any,
+      );
+
+      await (service as any).handleTask(11);
+
+      expect(mapAgentRunToAnalysisMock).toHaveBeenCalledWith({}, '600519', 'detailed', {
+        queryId: 'task-news-1',
+      });
+      expect(analysisHistoryCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          queryId: 'task-news-1',
+          code: '600519',
+          newsContent: '公告偏多',
+        }),
+      });
+      expect(newsFindUnique).toHaveBeenCalledWith({
+        where: { url: 'https://example.com/news-2' },
+      });
+      expect(newsCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          ownerUserId: 7,
+          queryId: 'task-news-1',
+          code: '600519',
+          title: '贵州茅台披露分红方案',
+          requesterUserId: '7',
+        }),
+      });
+      expect(analysisTaskUpdate).toHaveBeenCalledWith({
+        where: { id: 11 },
+        data: expect.objectContaining({
+          resultQueryId: 'task-news-1',
+        }),
       });
     });
   });

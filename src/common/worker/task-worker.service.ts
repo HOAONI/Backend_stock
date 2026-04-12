@@ -8,6 +8,7 @@ import { AgentRunBridgeService } from '@/common/agent/agent-run-bridge.service';
 import type { AgentRuntimeConfig } from '@/common/agent/agent.types';
 import { PrismaService } from '@/common/database/prisma.service';
 import { evaluateTradingSessionGuardFromEnv } from '@/common/utils/trading-session';
+import { normalizeAnalysisNewsItems, persistAnalysisNewsItems } from '@/modules/analysis/analysis-news';
 import { mapAgentRunToAnalysis } from '@/modules/analysis/analysis.mapper';
 import { AnalysisSchedulerService } from '@/modules/analysis/analysis-scheduler.service';
 import { AnalysisBrokerMeta, AnalysisService } from '@/modules/analysis/analysis.service';
@@ -742,7 +743,18 @@ export class TaskWorkerService {
         forceRuntimeConfig: options.forceRuntimeConfig,
       });
       // 统一先把 Agent 结果折叠成历史记录，再把桥接元信息和自动下单状态附着到任务结果里。
-      const mapped = mapAgentRunToAnalysis(bridgeResult.run, task.stockCode, task.reportType);
+      const mapped = mapAgentRunToAnalysis(bridgeResult.run, task.stockCode, task.reportType, {
+        queryId: task.taskId,
+      });
+      const normalizedNewsItems = task.ownerUserId != null
+        ? normalizeAnalysisNewsItems({
+            ownerUserId: task.ownerUserId,
+            queryId: task.taskId,
+            stockCode: mapped.historyRecord.code,
+            stockName: mapped.historyRecord.name,
+            items: mapped.newsItems,
+          })
+        : [];
       const autoOrder = this.deriveAutoOrderFromExecution({
         task: {
           stockCode: task.stockCode,
@@ -784,6 +796,7 @@ export class TaskWorkerService {
           takeProfit: mapped.historyRecord.takeProfit,
         },
       });
+      await persistAnalysisNewsItems(this.prisma, normalizedNewsItems);
 
       const completedAt = new Date();
       await this.prisma.analysisTask.update({
