@@ -44,7 +44,7 @@ bash scripts/system/start.sh --prepare-db
 bash scripts/system/start.sh --dev-backend --prepare-db
 ```
 
-这组根目录系统脚本默认只会按当前 `Backend_stock/.env` 中的 `DATABASE_URL` 做一次只读 schema 检查，再启动三服务；不会复用 `db:init`，也不会改写现有连接串。默认检查日志写入 `/tmp/stocksim/logs/backend-db-check.log`。只有显式传入 `--prepare-db` 时，才会执行重型 schema prepare，并把详细日志写入 `/tmp/stocksim/logs/backend-db-prepare.log`。
+这组根目录系统脚本默认只会按当前 `Backend_stock/.env` 中的 `DATABASE_URL` 做一次只读 schema 检查，再启动三服务；不会复用 `db:init`，也不会改写现有连接串。默认检查日志写入聚合工作区根目录下的 `logs/system/backend-db-check.log`。只有显式传入 `--prepare-db` 时，才会执行重型 schema prepare，并把详细日志写入聚合工作区根目录下的 `logs/system/backend-db-prepare.log`。
 
 如果默认检查提示 “Prisma migration 历史未收尾，但对应 schema 结构已经存在”，先在 `Backend_stock` 目录执行一次：
 
